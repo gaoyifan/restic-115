@@ -1,6 +1,6 @@
 //! Types for 115 Open Platform API responses.
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 fn deserialize_state<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
@@ -28,8 +28,6 @@ pub struct RefreshTokenResponse {
     pub code: Option<i64>,
     pub message: Option<String>,
     pub data: Option<RefreshTokenData>,
-    pub errno: Option<i64>,
-    pub error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,13 +81,10 @@ pub struct BoolResponse<T> {
     pub code: Option<i64>,
     pub message: Option<String>,
     pub data: Option<T>,
-    pub errno: Option<i64>,
-    pub error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct MkdirData {
-    pub file_name: Option<String>,
     pub file_id: Option<String>,
 }
 
@@ -113,8 +108,6 @@ pub struct UploadToken {
     pub access_key_secret_typo: Option<String>,
     #[serde(rename = "SecurityToken")]
     pub security_token: Option<String>,
-    #[serde(rename = "Expiration")]
-    pub expiration: Option<String>,
 }
 
 impl UploadToken {
@@ -145,9 +138,6 @@ pub struct DownUrlResponse {
     pub data: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct EmptyJson {}
-
 // ============================================================================
 // OSS callback result (returned by OSS PutObject/CompleteMultipartUpload with callback headers)
 // ============================================================================
@@ -157,7 +147,7 @@ pub struct OssCallbackResult {
     #[serde(default, deserialize_with = "deserialize_state")]
     pub state: Option<bool>,
     pub code: Option<i64>,
-    pub message: Option<String>,
+
     pub data: Option<OssCallbackData>,
 }
 
@@ -186,7 +176,7 @@ pub struct OssCallbackData {
 pub struct SearchResponse {
     #[serde(default)]
     pub data: Vec<SearchEntry>,
-    pub count: Option<i64>,
+
     #[serde(default, deserialize_with = "deserialize_state")]
     pub state: Option<bool>,
     pub code: Option<i64>,
