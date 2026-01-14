@@ -57,6 +57,7 @@ fn upsert_env_var_line(line: &str, key: &str, value: &str) -> Option<String> {
         return None;
     }
     if let Some(rest) = trimmed.strip_prefix(key) {
+        let rest = rest.trim_start();
         if rest.starts_with('=') {
             return Some(format!("{key}={value}"));
         }
@@ -64,7 +65,11 @@ fn upsert_env_var_line(line: &str, key: &str, value: &str) -> Option<String> {
     None
 }
 
-fn persist_tokens_to_file(path: &Path, access_token: &str, refresh_token: &str) -> std::io::Result<()> {
+fn persist_tokens_to_file(
+    path: &Path,
+    access_token: &str,
+    refresh_token: &str,
+) -> std::io::Result<()> {
     use std::fs;
     use std::io::Write;
 
@@ -76,10 +81,7 @@ fn persist_tokens_to_file(path: &Path, access_token: &str, refresh_token: &str) 
 
     // Normalize line endings to '\n' for editing; preserve trailing newline.
     let had_trailing_newline = content.ends_with('\n');
-    let mut lines: Vec<String> = content
-        .split('\n')
-        .map(|s| s.to_string())
-        .collect();
+    let mut lines: Vec<String> = content.split('\n').map(|s| s.to_string()).collect();
 
     // When file ends with '\n', split() gives last empty entry; keep it for stable rewrite.
     let mut seen_access = false;
@@ -224,7 +226,7 @@ impl TokenManager {
                     Ok(r) => r,
                     Err(e) => {
                         // Network/timeout: treat as retryable with backoff.
-                    if attempt < MAX_RATE_LIMIT_RETRIES {
+                        if attempt < MAX_RATE_LIMIT_RETRIES {
                             tracing::warn!(
                                 "refreshToken network error, backing off attempt {}/{}: {}",
                                 attempt,
@@ -305,9 +307,7 @@ impl TokenManager {
             AppError::Auth("Refresh token succeeded but missing refresh_token".to_string())
         })?;
 
-        let expires_at = data
-            .expires_in
-            .map(|s| Utc::now() + Duration::seconds(s));
+        let expires_at = data.expires_in.map(|s| Utc::now() + Duration::seconds(s));
 
         {
             let mut guard = self.token.write();
@@ -329,11 +329,7 @@ impl TokenManager {
                     );
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "Failed to persist refreshed tokens to {:?}: {}",
-                        path,
-                        e
-                    );
+                    tracing::warn!("Failed to persist refreshed tokens to {:?}: {}", path, e);
                 }
             }
         }
@@ -350,3 +346,73 @@ impl std::fmt::Debug for TokenManager {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_upsert_env_var_line() {
+        // Normal case
+        assert_eq!(
+            upsert_env_var_line("OPEN115_ACCESS_TOKEN=old", "OPEN115_ACCESS_TOKEN", "new"),
+            Some("OPEN115_ACCESS_TOKEN=new".to_string())
+        );
+        // With spaces (the fix)
+        assert_eq!(
+            upsert_env_var_line("OPEN115_ACCESS_TOKEN = old", "OPEN115_ACCESS_TOKEN", "new"),
+            Some("OPEN115_ACCESS_TOKEN=new".to_string())
+        );
+        assert_eq!(
+            upsert_env_var_line(
+                "  OPEN115_ACCESS_TOKEN  =  old  ",
+                "OPEN115_ACCESS_TOKEN",
+                "new"
+            ),
+            Some("OPEN115_ACCESS_TOKEN=new".to_string())
+        );
+        // Comments should be ignored
+        assert_eq!(
+            upsert_env_var_line("# OPEN115_ACCESS_TOKEN=old", "OPEN115_ACCESS_TOKEN", "new"),
+            None
+        );
+        // Unrelated lines should be ignored
+        assert_eq!(
+            upsert_env_var_line("SOME_OTHER_VAR=val", "OPEN115_ACCESS_TOKEN", "new"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_persist_tokens_to_file() -> std::io::Result<()> {
+        let mut tmp = NamedTempFile::new()?;
+        let path = tmp.path().to_path_buf();
+
+        // 1. Initial creation
+        persist_tokens_to_file(&path, "acc1", "ref1")?;
+        let content = std::fs::read_to_string(&path)?;
+        assert!(content.contains("OPEN115_ACCESS_TOKEN=acc1"));
+        assert!(content.contains("OPEN115_REFRESH_TOKEN=ref1"));
+
+        // 2. Update existing (one with spaces)
+        {
+            let mut f = std::fs::File::create(&path)?;
+            writeln!(f, "OPEN115_ACCESS_TOKEN = acc1")?;
+            writeln!(f, "OPEN115_REFRESH_TOKEN=ref1")?;
+            writeln!(f, "# comment")?;
+        }
+        persist_tokens_to_file(&path, "acc2", "ref2")?;
+        let content = std::fs::read_to_string(&path)?;
+        assert!(content.contains("OPEN115_ACCESS_TOKEN=acc2"));
+        assert!(content.contains("OPEN115_REFRESH_TOKEN=ref2"));
+        assert!(!content.contains("acc1"));
+        assert!(!content.contains("ref1"));
+        assert!(content.contains("# comment"));
+        // Ensure no duplicates
+        assert_eq!(content.matches("OPEN115_ACCESS_TOKEN=").count(), 1);
+        assert_eq!(content.matches("OPEN115_REFRESH_TOKEN=").count(), 1);
+
+        Ok(())
+    }
+}
