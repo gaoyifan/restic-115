@@ -187,10 +187,10 @@ impl TokenManager {
     pub async fn get_token(&self) -> Result<String> {
         {
             let guard = self.token.read();
-            if let Some(t) = guard.as_ref() {
-                if !t.is_expired() {
-                    return Ok(t.access_token.clone());
-                }
+            if let Some(t) = guard.as_ref()
+                && !t.is_expired()
+            {
+                return Ok(t.access_token.clone());
             }
         }
         self.refresh_token().await
@@ -203,9 +203,10 @@ impl TokenManager {
                 .as_ref()
                 .map(|t| t.refresh_token.clone())
                 .ok_or_else(|| {
-                    AppError::Auth(format!(
+                    AppError::Auth(
                         "Missing refresh token. Obtain tokens via callback server and set OPEN115_ACCESS_TOKEN/OPEN115_REFRESH_TOKEN."
-                    ))
+                            .to_string(),
+                    )
                 })?
         };
 

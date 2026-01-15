@@ -17,19 +17,23 @@ pub enum ResticFileType {
     Config,
 }
 
-impl ResticFileType {
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for ResticFileType {
+    type Err = ();
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
-            "data" => Some(Self::Data),
-            "keys" => Some(Self::Keys),
-            "locks" => Some(Self::Locks),
-            "snapshots" => Some(Self::Snapshots),
-            "index" => Some(Self::Index),
-            "config" => Some(Self::Config),
-            _ => None,
+            "data" => Ok(Self::Data),
+            "keys" => Ok(Self::Keys),
+            "locks" => Ok(Self::Locks),
+            "snapshots" => Ok(Self::Snapshots),
+            "index" => Ok(Self::Index),
+            "config" => Ok(Self::Config),
+            _ => Err(()),
         }
     }
+}
 
+impl ResticFileType {
     pub fn dirname(&self) -> &'static str {
         match self {
             Self::Data => "data",
@@ -45,4 +49,3 @@ impl ResticFileType {
         matches!(self, Self::Config)
     }
 }
-

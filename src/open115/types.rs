@@ -51,8 +51,7 @@ pub struct FileListResponse {
 #[derive(Debug, Deserialize, Clone)]
 pub struct FileEntry {
     pub fid: String,
-    #[serde(default)]
-    pub pid: String,
+
     pub fc: String,
     #[serde(rename = "fn")]
     pub name: String,
@@ -60,8 +59,6 @@ pub struct FileEntry {
     pub fs: i64,
     #[serde(default)]
     pub pc: String,
-    #[serde(default)]
-    pub sha1: String,
 }
 
 impl FileEntry {
@@ -161,43 +158,7 @@ pub struct OssCallbackData {
     pub file_size: i64,
     #[serde(rename = "file_id", default)]
     pub file_id: String,
-    #[serde(default)]
-    pub sha1: String,
+
     #[serde(default)]
     pub cid: String,
-}
-
-// ============================================================================
-// Search
-// ============================================================================
-
-/// Response for /open/ufile/search
-#[derive(Debug, Deserialize, Clone)]
-pub struct SearchResponse {
-    #[serde(default)]
-    pub data: Vec<SearchEntry>,
-
-    #[serde(default, deserialize_with = "deserialize_state")]
-    pub state: Option<bool>,
-    pub code: Option<i64>,
-    pub message: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct SearchEntry {
-    #[serde(rename = "file_id")]
-    pub file_id: String,
-    #[serde(rename = "file_name")]
-    pub file_name: String,
-    #[serde(rename = "file_size", default)]
-    pub file_size: String,
-    #[serde(rename = "parent_id", default)]
-    pub parent_id: String,
-    #[serde(rename = "pick_code", default)]
-    pub pick_code: String,
-    #[serde(default)]
-    pub sha1: String,
-    /// "1" file, "0" folder (per docs)
-    #[serde(rename = "file_category", default)]
-    pub file_category: String,
 }

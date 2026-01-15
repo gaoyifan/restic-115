@@ -10,7 +10,7 @@ use reqwest::multipart::Form;
 use serde_json::Value;
 use sha1::Digest;
 use std::collections::HashMap;
-use std::env;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,26 +25,10 @@ type HmacSha1 = Hmac<sha1::Sha1>;
 const MAX_RATE_LIMIT_RETRIES: usize = 6;
 const MAX_OSS_PUT_RESPONSE_LOG_BYTES: usize = 512 * 1024; // 512KiB, callback JSON should be tiny.
 
-fn truthy_env(key: &str) -> bool {
-    match env::var(key) {
-        Ok(v) => {
-            let v = v.trim().to_ascii_lowercase();
-            matches!(v.as_str(), "1" | "true" | "yes" | "y" | "on")
-        }
-        Err(_) => false,
-    }
-}
-
-fn should_dump_oss_putobject_response() -> bool {
-    // Force printing the full PutObject response even if RUST_LOG isn't debug.
-    // Useful for debugging OSS callback responses that affect read-after-write semantics.
-    truthy_env("OPEN115_DUMP_OSS_PUTOBJECT_RESPONSE")
-}
-
 fn is_access_token_invalid(code: i64) -> bool {
     // See docs/115/接入指南/授权错误码.md
     // 40140125: access_token 无效（已过期或者已解除授权） -> refresh via /open/refreshToken
-    matches!(code, 40140123 | 40140124 | 40140125 | 40140126)
+    matches!(code, 40140123..=40140126)
 }
 
 fn is_quota_limited(code: i64) -> bool {
@@ -73,9 +57,7 @@ pub struct FileInfo {
     pub filename: String,
     pub is_dir: bool,
     pub size: i64,
-    pub parent_id: String,
     pub pick_code: String,
-    pub sha1: String,
 }
 
 #[derive(Clone)]
@@ -233,9 +215,7 @@ impl Open115Client {
                     filename: e.name().to_string(),
                     is_dir: e.is_dir(),
                     size: e.fs,
-                    parent_id: e.pid.clone(),
                     pick_code: e.pc.clone(),
-                    sha1: e.sha1.clone(),
                 });
             }
 
@@ -432,25 +412,6 @@ impl Open115Client {
     // Directory operations
     // =========================================================================
 
-    async fn search_in_dir(
-        &self,
-        cid: &str,
-        search_value: &str,
-        fc: Option<i64>,
-    ) -> Result<SearchResponse> {
-        let url = format!("{}/open/ufile/search", self.api_base);
-        let mut query = vec![
-            ("search_value", search_value.to_string()),
-            ("limit", "100".to_string()),
-            ("offset", "0".to_string()),
-            ("cid", cid.to_string()),
-        ];
-        if let Some(fc) = fc {
-            query.push(("fc", fc.to_string()));
-        }
-        self.get_json(&url, &query).await
-    }
-
     /// Find a file/dir by exact name under a directory using the cache.
     pub async fn find_file(&self, cid: &str, name: &str) -> Result<Option<FileInfo>> {
         let cache = self.files_cache.read();
@@ -485,10 +446,10 @@ impl Open115Client {
         if !ok || code != 0 {
             // might already exist
             // self.mark_dir_dirty(pid); // No more dirty marking
-            if let Some(existing) = self.find_file(pid, name).await? {
-                if existing.is_dir {
-                    return Ok(existing.file_id);
-                }
+            if let Some(existing) = self.find_file(pid, name).await?
+                && existing.is_dir
+            {
+                return Ok(existing.file_id);
             }
             return Err(AppError::Open115Api {
                 code,
@@ -509,9 +470,7 @@ impl Open115Client {
                 filename: name.to_string(),
                 is_dir: true,
                 size: 0,
-                parent_id: pid.to_string(),
                 pick_code: String::new(),
-                sha1: String::new(),
             });
             cache.insert(id.clone(), Vec::new());
         }
@@ -639,21 +598,6 @@ impl Open115Client {
         self.find_file(cid, filename).await
     }
 
-    /// Get file info with an optional directory-listing fallback.
-    ///
-    /// - Uses search API first (cheap).
-    /// - Optionally falls back to listing the directory (use only for small dirs like repo root,
-    ///   keys/index/snapshots/etc). **Do not** use for `data/{00..ff}` hash subdirs.
-    pub async fn get_file_info_with_fallback(
-        &self,
-        cid: &str,
-        filename: &str,
-        _allow_list_fallback: bool,
-    ) -> Result<Option<FileInfo>> {
-        // Cache only.
-        self.find_file(cid, filename).await
-    }
-
     pub async fn delete_file(&self, parent_id: &str, file_id: &str) -> Result<()> {
         let url = format!("{}/open/ufile/delete", self.api_base);
         let file_id_s = file_id.to_string();
@@ -753,6 +697,7 @@ impl Open115Client {
         Some((start, end))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn upload_init(
         &self,
         parent_id: &str,
@@ -851,10 +796,10 @@ impl Open115Client {
 
     fn extract_init_field<'a>(data: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
         for k in keys {
-            if let Some(v) = data.get(*k).and_then(|x| x.as_str()) {
-                if !v.is_empty() {
-                    return Some(v);
-                }
+            if let Some(v) = data.get(*k).and_then(|x| x.as_str())
+                && !v.is_empty()
+            {
+                return Some(v);
             }
         }
         None
@@ -896,6 +841,7 @@ impl Open115Client {
         None
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn oss_put_object(
         &self,
         endpoint: &str,
@@ -946,7 +892,7 @@ impl Open115Client {
         let cb_var_b64 = base64::engine::general_purpose::STANDARD.encode(callback_var);
 
         // Canonicalized OSS headers
-        let mut oss_headers = vec![
+        let mut oss_headers = [
             ("x-oss-callback".to_string(), cb_b64.clone()),
             ("x-oss-callback-var".to_string(), cb_var_b64.clone()),
             (
@@ -994,25 +940,14 @@ impl Open115Client {
         if !status.is_success() {
             let bytes = resp.bytes().await.unwrap_or_default();
             let body_text = String::from_utf8_lossy(&bytes).to_string();
-            if should_dump_oss_putobject_response() {
-                tracing::info!(
-                    target: "open115::oss",
-                    status = %status,
-                    headers = ?headers,
-                    body_len = bytes.len(),
-                    body = %body_text,
-                    "OSS PutObject error response (dump enabled)"
-                );
-            } else {
-                tracing::debug!(
-                    target: "open115::oss",
-                    status = %status,
-                    headers = ?headers,
-                    body_len = bytes.len(),
-                    body = %body_text,
-                    "OSS PutObject error response"
-                );
-            }
+            tracing::trace!(
+                target: "open115::oss",
+                status = %status,
+                headers = ?headers,
+                body_len = bytes.len(),
+                body = %body_text,
+                "OSS PutObject error response"
+            );
             return Err(AppError::Internal(format!(
                 "OSS put failed: status={}, body={}",
                 status, body_text
@@ -1034,27 +969,15 @@ impl Open115Client {
                 Err(_) => String::from_utf8_lossy(&log_body).to_string(),
             };
 
-            if should_dump_oss_putobject_response() {
-                tracing::info!(
-                    target: "open115::oss",
-                    status = %status,
-                    headers = ?headers,
-                    body_len = bytes.len(),
-                    truncated = truncated,
-                    body = %body_to_log,
-                    "OSS PutObject success response (dump enabled)"
-                );
-            } else {
-                tracing::debug!(
-                    target: "open115::oss",
-                    status = %status,
-                    headers = ?headers,
-                    body_len = bytes.len(),
-                    truncated = truncated,
-                    body = %body_to_log,
-                    "OSS PutObject success response"
-                );
-            }
+            tracing::trace!(
+                target: "open115::oss",
+                status = %status,
+                headers = ?headers,
+                body_len = bytes.len(),
+                truncated = truncated,
+                body = %body_to_log,
+                "OSS PutObject success response"
+            );
         }
         if bytes.is_empty() {
             return Ok(None);
@@ -1062,24 +985,19 @@ impl Open115Client {
         if let Ok(cb) = serde_json::from_slice::<OssCallbackResult>(&bytes) {
             let ok = cb.state.unwrap_or(false);
             let code = cb.code.unwrap_or(0);
-            if ok && code == 0 {
-                if let Some(d) = cb.data {
-                    if !d.file_id.is_empty() && !d.pick_code.is_empty() {
-                        return Ok(Some(d));
-                    }
-                }
+            if ok
+                && code == 0
+                && let Some(d) = cb.data
+                && !d.file_id.is_empty()
+                && !d.pick_code.is_empty()
+            {
+                return Ok(Some(d));
             }
         }
         Ok(None)
     }
 
-    pub async fn upload_file(
-        &self,
-        parent_id: &str,
-        filename: &str,
-        data: Bytes,
-        wait_visible: bool,
-    ) -> Result<()> {
+    pub async fn upload_file(&self, parent_id: &str, filename: &str, data: Bytes) -> Result<()> {
         let file_size = data.len();
         let file_sha1 = Self::sha1_hex_upper(&data);
         let pre_len = 128 * 1024;
@@ -1124,9 +1042,7 @@ impl Open115Client {
                     filename: filename.to_string(),
                     is_dir: false,
                     size: file_size as i64,
-                    parent_id: parent_id.to_string(),
-                    pick_code: pick_code,
-                    sha1: file_sha1.clone(),
+                    pick_code,
                 };
 
                 let mut cache = self.files_cache.write();
@@ -1150,38 +1066,38 @@ impl Open115Client {
             return Ok(());
         }
 
-        if matches!(status, 6 | 7 | 8) {
+        if matches!(status, 6..=8) {
             let sign_check = Self::extract_init_field(&init_data, &["sign_check", "signCheck"]);
             let sign_key = Self::extract_init_field(&init_data, &["sign_key", "signKey"]);
-            if let (Some(sc), Some(sk)) = (sign_check, sign_key) {
-                if let Some((start, end)) = Self::parse_sign_check(sc) {
-                    if file_size == 0 || start >= file_size {
-                        return Err(AppError::Internal(format!(
-                            "upload init returned invalid sign_check={} for file_size={}",
-                            sc, file_size
-                        )));
-                    }
-                    let end = end.min(file_size.saturating_sub(1));
-                    if start > end {
-                        return Err(AppError::Internal(format!(
-                            "upload init returned invalid sign_check={} (start>end) for file_size={}",
-                            sc, file_size
-                        )));
-                    }
-                    let sign_val = Self::sha1_hex_upper(&data[start..=end]);
-                    init_data = self
-                        .upload_init(
-                            parent_id,
-                            filename,
-                            file_size,
-                            &file_sha1,
-                            &pre_sha1,
-                            None,
-                            Some(sk),
-                            Some(&sign_val),
-                        )
-                        .await?;
+            if let (Some(sc), Some(sk)) = (sign_check, sign_key)
+                && let Some((start, end)) = Self::parse_sign_check(sc)
+            {
+                if file_size == 0 || start >= file_size {
+                    return Err(AppError::Internal(format!(
+                        "upload init returned invalid sign_check={} for file_size={}",
+                        sc, file_size
+                    )));
                 }
+                let end = end.min(file_size.saturating_sub(1));
+                if start > end {
+                    return Err(AppError::Internal(format!(
+                        "upload init returned invalid sign_check={} (start>end) for file_size={}",
+                        sc, file_size
+                    )));
+                }
+                let sign_val = Self::sha1_hex_upper(&data[start..=end]);
+                init_data = self
+                    .upload_init(
+                        parent_id,
+                        filename,
+                        file_size,
+                        &file_sha1,
+                        &pre_sha1,
+                        None,
+                        Some(sk),
+                        Some(&sign_val),
+                    )
+                    .await?;
             }
         }
 
@@ -1205,9 +1121,7 @@ impl Open115Client {
                     filename: filename.to_string(),
                     is_dir: false,
                     size: file_size as i64,
-                    parent_id: parent_id.to_string(),
-                    pick_code: pick_code,
-                    sha1: file_sha1.clone(),
+                    pick_code,
                 };
                 let mut cache = self.files_cache.write();
                 if let Some(files) = cache.get_mut(parent_id) {
@@ -1291,9 +1205,7 @@ impl Open115Client {
                 filename,
                 is_dir: false,
                 size: cb.file_size,
-                parent_id: cid.clone(),
                 pick_code: cb.pick_code.clone(),
-                sha1: cb.sha1.clone(),
             };
 
             let mut cache = self.files_cache.write();
@@ -1306,14 +1218,6 @@ impl Open115Client {
             } else {
                 cache.insert(cid, vec![info]);
             }
-        } else if wait_visible {
-            // Fallback: if we didn't get callback data but asked to wait?
-            // We can't search-wait anymore.
-            // We just have to hope. Or maybe we can't do anything.
-            tracing::warn!(
-                "Upload finished but no callback data and search-verify is disabled. Cache might be stale for {}",
-                filename
-            );
         }
         Ok(())
     }

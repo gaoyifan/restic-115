@@ -88,11 +88,7 @@ async fn head_config(State(state): State<Arc<AppState>>) -> Result<impl IntoResp
         .ok_or_else(|| AppError::NotFound("config".to_string()))?;
 
     // After upload, search indexing can lag. Repo root is small; allow listing fallback.
-    match state
-        .client
-        .get_file_info_with_fallback(&dir_id, "config", true)
-        .await?
-    {
+    match state.client.find_file(&dir_id, "config").await? {
         Some(file) => {
             let mut headers = HeaderMap::new();
             headers.insert(
@@ -115,7 +111,7 @@ async fn get_config(State(state): State<Arc<AppState>>) -> Result<impl IntoRespo
 
     let file = state
         .client
-        .get_file_info_with_fallback(&dir_id, "config", true)
+        .find_file(&dir_id, "config")
         .await?
         .ok_or_else(|| AppError::NotFound("config".to_string()))?;
 
@@ -145,10 +141,7 @@ async fn post_config(
     tracing::info!("Saving config ({} bytes)", body.len());
     let dir_id = state.client.get_type_dir_id(ResticFileType::Config).await?;
     // Config is immediately read by restic; wait for visibility (via search API, no dir listing).
-    state
-        .client
-        .upload_file(&dir_id, "config", body, false)
-        .await?;
+    state.client.upload_file(&dir_id, "config", body).await?;
     Ok(StatusCode::OK)
 }
 
@@ -160,7 +153,9 @@ async fn list_files(
     State(state): State<Arc<AppState>>,
     Path(type_str): Path<String>,
 ) -> Result<Response> {
-    let file_type = ResticFileType::from_str(&type_str)
+    let file_type = type_str
+        .parse::<ResticFileType>()
+        .ok()
         .ok_or_else(|| AppError::BadRequest(format!("Invalid type: {}", type_str)))?;
 
     if file_type.is_config() {
@@ -205,7 +200,9 @@ async fn head_file(
     State(state): State<Arc<AppState>>,
     Path((type_str, name)): Path<(String, String)>,
 ) -> Result<impl IntoResponse> {
-    let file_type = ResticFileType::from_str(&type_str)
+    let file_type = type_str
+        .parse::<ResticFileType>()
+        .ok()
         .ok_or_else(|| AppError::BadRequest(format!("Invalid type: {}", type_str)))?;
 
     // Read-only: do NOT create directories on HEAD/GET/DELETE.
@@ -224,12 +221,7 @@ async fn head_file(
     };
 
     // Avoid listing inside data hash subdirs; allow listing fallback for non-data dirs only.
-    let allow_list_fallback = file_type != ResticFileType::Data;
-    match state
-        .client
-        .get_file_info_with_fallback(&dir_id, &name, allow_list_fallback)
-        .await?
-    {
+    match state.client.find_file(&dir_id, &name).await? {
         Some(file) => {
             let mut headers = HeaderMap::new();
             headers.insert(
@@ -290,7 +282,9 @@ async fn get_file(
     Path((type_str, name)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse> {
-    let file_type = ResticFileType::from_str(&type_str)
+    let file_type = type_str
+        .parse::<ResticFileType>()
+        .ok()
         .ok_or_else(|| AppError::BadRequest(format!("Invalid type: {}", type_str)))?;
 
     // Read-only: do NOT create directories on HEAD/GET/DELETE.
@@ -310,7 +304,7 @@ async fn get_file(
 
     let file = state
         .client
-        .get_file_info_with_fallback(&dir_id, &name, file_type != ResticFileType::Data)
+        .find_file(&dir_id, &name)
         .await?
         .ok_or_else(|| AppError::NotFound(name.clone()))?;
 
@@ -383,7 +377,9 @@ async fn post_file(
         .await
         .map_err(|e| AppError::BadRequest(format!("Failed to read request body: {}", e)))?;
 
-    let file_type = ResticFileType::from_str(&type_str)
+    let file_type = type_str
+        .parse::<ResticFileType>()
+        .ok()
         .ok_or_else(|| AppError::BadRequest(format!("Invalid type: {}", type_str)))?;
 
     tracing::info!("Uploading {}/{} ({} bytes)", type_str, name, body.len());
@@ -394,10 +390,7 @@ async fn post_file(
         state.client.get_type_dir_id(file_type).await?
     };
 
-    state
-        .client
-        .upload_file(&dir_id, &name, body, false)
-        .await?;
+    state.client.upload_file(&dir_id, &name, body).await?;
     Ok(StatusCode::OK)
 }
 
@@ -405,7 +398,9 @@ async fn delete_file(
     State(state): State<Arc<AppState>>,
     Path((type_str, name)): Path<(String, String)>,
 ) -> Result<impl IntoResponse> {
-    let file_type = ResticFileType::from_str(&type_str)
+    let file_type = type_str
+        .parse::<ResticFileType>()
+        .ok()
         .ok_or_else(|| AppError::BadRequest(format!("Invalid type: {}", type_str)))?;
 
     tracing::info!("Deleting {}/{}", type_str, name);
@@ -423,11 +418,7 @@ async fn delete_file(
         }
     };
 
-    if let Some(file) = state
-        .client
-        .get_file_info_with_fallback(&dir_id, &name, file_type != ResticFileType::Data)
-        .await?
-    {
+    if let Some(file) = state.client.find_file(&dir_id, &name).await? {
         // Best-effort: clear in-memory hint cache for this file.
 
         state.client.delete_file(&dir_id, &file.file_id).await?;
