@@ -1,12 +1,12 @@
 //! Restic REST API v2 handlers.
 
 use axum::{
+    Router,
     body::{Body, Bytes},
     extract::{Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, head, post},
-    Router,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -156,7 +156,10 @@ async fn post_config(
 // File Listing
 // ============================================================================
 
-async fn list_files(State(state): State<Arc<AppState>>, Path(type_str): Path<String>) -> Result<Response> {
+async fn list_files(
+    State(state): State<Arc<AppState>>,
+    Path(type_str): Path<String>,
+) -> Result<Response> {
     let file_type = ResticFileType::from_str(&type_str)
         .ok_or_else(|| AppError::BadRequest(format!("Invalid type: {}", type_str)))?;
 
@@ -245,9 +248,14 @@ enum RangeParseError {
     Unsatisfiable,
 }
 
-fn parse_range(header_val: &str, file_size: u64) -> std::result::Result<(u64, u64), RangeParseError> {
+fn parse_range(
+    header_val: &str,
+    file_size: u64,
+) -> std::result::Result<(u64, u64), RangeParseError> {
     // Only a single range is supported (sufficient for restic).
-    let range_spec = header_val.strip_prefix("bytes=").ok_or(RangeParseError::Invalid)?;
+    let range_spec = header_val
+        .strip_prefix("bytes=")
+        .ok_or(RangeParseError::Invalid)?;
     let parts: Vec<&str> = range_spec.split('-').collect();
     if parts.len() != 2 {
         return Err(RangeParseError::Invalid);
@@ -324,7 +332,11 @@ async fn get_file(
                     format!("bytes */{}", file_size).parse().unwrap(),
                 );
                 resp_headers.insert(header::CONTENT_LENGTH, "0".parse().unwrap());
-                return Ok((StatusCode::RANGE_NOT_SATISFIABLE, resp_headers, Bytes::new())
+                return Ok((
+                    StatusCode::RANGE_NOT_SATISFIABLE,
+                    resp_headers,
+                    Bytes::new(),
+                )
                     .into_response());
             }
         };
@@ -417,10 +429,9 @@ async fn delete_file(
         .await?
     {
         // Best-effort: clear in-memory hint cache for this file.
-        state.client.remove_file_hint(&dir_id, &name);
+
         state.client.delete_file(&dir_id, &file.file_id).await?;
     }
 
     Ok(StatusCode::OK)
 }
-

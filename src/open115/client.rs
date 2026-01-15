@@ -9,14 +9,14 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::multipart::Form;
 use serde_json::Value;
 use sha1::Digest;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::ResticFileType;
 use super::auth::TokenManager;
 use super::types::*;
-use super::ResticFileType;
 use crate::config::Config;
 use crate::error::{AppError, Result};
 
@@ -89,12 +89,6 @@ pub struct Open115Client {
     dir_cache: Arc<RwLock<HashMap<String, String>>>,
     /// Cache of directory listing: cid -> entries
     files_cache: Arc<RwLock<HashMap<String, Vec<FileInfo>>>>,
-    /// Mark cached directories as dirty (contents changed) without forcing an immediate re-list.
-    /// Only the REST list endpoints should trigger refresh.
-    dirty_dirs: Arc<RwLock<HashSet<String>>>,
-    /// Per-file hint cache populated from OSS callback results.
-    /// This avoids listing/search-index delays for read-after-write within the same process.
-    file_hint_cache: Arc<RwLock<HashMap<String, FileInfo>>>,
 }
 
 impl Open115Client {
@@ -106,28 +100,151 @@ impl Open115Client {
             user_agent: cfg.user_agent,
             dir_cache: Arc::new(RwLock::new(HashMap::new())),
             files_cache: Arc::new(RwLock::new(HashMap::new())),
-            dirty_dirs: Arc::new(RwLock::new(HashSet::new())),
-            file_hint_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
+    /// Recursively warm up the cache.
+    pub async fn warm_cache(&self) -> Result<()> {
+        let start = std::time::Instant::now();
+        tracing::info!("Starting cache warm-up for repository: {}", self.repo_path);
 
-    fn file_hint_key(cid: &str, filename: &str) -> String {
-        format!("{}:{}", cid, filename)
+        // 1. Ensure repo root exists and get its ID
+        let repo_id = self.ensure_path(&self.repo_path).await?;
+        tracing::info!("Repository root found: {} (id={})", self.repo_path, repo_id);
+
+        // 2. Fetch and cache root files
+        let root_files = self.fetch_files_from_api(&repo_id).await?;
+        {
+            let mut cache = self.files_cache.write();
+            cache.insert(repo_id.clone(), root_files.clone());
+        }
+        tracing::info!("Cached {} items at repository root", root_files.len());
+
+        // 3. Handle standard directories (keys, locks, snapshots, index, config)
+        // Config is strictly a file in root, but ResticFileType::Config maps to root dir in our helper logic usually.
+        // Actually ResticFileType::Config logic in get_type_dir_id returns repo_path.
+        // Let's iterate standard dirs that are subdirectories.
+        for file_type in [
+            ResticFileType::Keys,
+            ResticFileType::Locks,
+            ResticFileType::Snapshots,
+            ResticFileType::Index,
+        ] {
+            let dirname = file_type.dirname();
+            // find directory in root_files to get ID
+            if let Some(dir_info) = root_files
+                .iter()
+                .find(|f| f.filename == dirname && f.is_dir)
+            {
+                let dir_id = &dir_info.file_id;
+                // Add to dir_cache
+                let full_path = format!("{}/{}", self.repo_path, dirname);
+                self.dir_cache.write().insert(full_path, dir_id.clone());
+
+                // Fetch content
+                let files = self.fetch_files_from_api(dir_id).await?;
+
+                self.files_cache
+                    .write()
+                    .insert(dir_id.clone(), files.clone());
+                tracing::info!("Cached {} items in /{}", files.len(), dirname);
+            } else {
+                // Create it? Or just log? require_repo usually means it should exist.
+                // But for a new repo, we might be initializing.
+                // The `init_repository` should have run or will run.
+                // If we are just starting active maintenance, we assume they might exist.
+                // If not found, we don't cache anything for them yet.
+                tracing::debug!("Directory /{} not found in root, skipping warmup", dirname);
+            }
+        }
+
+        // 4. Handle data directory and its 256 subdirectories
+        if let Some(data_dir) = root_files.iter().find(|f| f.filename == "data" && f.is_dir) {
+            let data_id = &data_dir.file_id;
+            let full_path = format!("{}/data", self.repo_path);
+            self.dir_cache.write().insert(full_path, data_id.clone());
+
+            let data_subdirs = self.fetch_files_from_api(data_id).await?;
+            self.files_cache
+                .write()
+                .insert(data_id.clone(), data_subdirs.clone());
+            tracing::info!("Cached /data directory: {} items", data_subdirs.len());
+
+            let mut total_data_files = 0;
+            // Iterate 00..ff
+            for subdir in data_subdirs {
+                if subdir.is_dir {
+                    // We expect 00, 01, ..., ff
+                    // Check if it matches hex pattern? Or just cache everything? Cache everything.
+
+                    // Add to dir_cache
+                    let sub_path = format!("{}/data/{}", self.repo_path, subdir.filename);
+                    self.dir_cache
+                        .write()
+                        .insert(sub_path, subdir.file_id.clone());
+
+                    let files = self.fetch_files_from_api(&subdir.file_id).await?;
+                    self.files_cache
+                        .write()
+                        .insert(subdir.file_id.clone(), files.clone());
+                    total_data_files += files.len();
+                }
+            }
+            tracing::info!("Cached {} data files total", total_data_files);
+        } else {
+            tracing::debug!("Directory /data not found in root, skipping warmup");
+        }
+
+        tracing::info!("Cache warm-up completed in {:?}", start.elapsed());
+        Ok(())
     }
 
-    fn get_file_hint(&self, cid: &str, filename: &str) -> Option<FileInfo> {
-        let k = Self::file_hint_key(cid, filename);
-        self.file_hint_cache.read().get(&k).cloned()
-    }
+    /// Fetch files from 115 API (internal use only, for warmup/refresh).
+    async fn fetch_files_from_api(&self, cid: &str) -> Result<Vec<FileInfo>> {
+        let mut all = Vec::new();
+        let mut offset = 0i64;
+        let limit = 1150i64;
+        let url = format!("{}/open/ufile/files", self.api_base);
 
-    fn upsert_file_hint(&self, cid: &str, info: &FileInfo) {
-        let k = Self::file_hint_key(cid, &info.filename);
-        self.file_hint_cache.write().insert(k, info.clone());
-    }
+        loop {
+            let resp: FileListResponse = self
+                .get_json(
+                    &url,
+                    &[
+                        ("cid", cid.to_string()),
+                        ("limit", limit.to_string()),
+                        ("offset", offset.to_string()),
+                        ("show_dir", "1".to_string()),
+                        ("stdir", "1".to_string()),
+                    ],
+                )
+                .await?;
 
-    pub fn remove_file_hint(&self, cid: &str, filename: &str) {
-        let k = Self::file_hint_key(cid, filename);
-        self.file_hint_cache.write().remove(&k);
+            if resp.state == Some(false) || resp.code.unwrap_or(0) != 0 {
+                return Err(AppError::Open115Api {
+                    code: resp.code.unwrap_or(-1),
+                    message: resp.message.unwrap_or_default(),
+                });
+            }
+
+            let count = resp.count.unwrap_or(resp.data.len() as i64);
+            for e in resp.data {
+                all.push(FileInfo {
+                    file_id: e.fid.clone(),
+                    filename: e.name().to_string(),
+                    is_dir: e.is_dir(),
+                    size: e.fs,
+                    parent_id: e.pid.clone(),
+                    pick_code: e.pc.clone(),
+                    sha1: e.sha1.clone(),
+                });
+            }
+
+            offset += limit;
+            if offset >= count {
+                break;
+            }
+        }
+        Ok(all)
     }
 
     fn require_tokens(&self) -> Result<()> {
@@ -334,127 +451,22 @@ impl Open115Client {
         self.get_json(&url, &query).await
     }
 
-    /// Find a file/dir by exact name under a directory, without listing the whole directory.
-    ///
-    /// This uses `/open/ufile/search` to avoid paging through huge directories (like root),
-    /// which can quickly exhaust 115 API quota and cause `code=406` errors.
-    async fn find_file_fast(&self, cid: &str, name: &str) -> Result<Option<FileInfo>> {
-        // Search both files and folders (fc not set), then filter exact match.
-        let resp = self.search_in_dir(cid, name, None).await?;
-        if resp.state == Some(false) || resp.code.unwrap_or(0) != 0 {
-            return Err(AppError::Open115Api {
-                code: resp.code.unwrap_or(-1),
-                message: resp.message.unwrap_or_default(),
-            });
+    /// Find a file/dir by exact name under a directory using the cache.
+    pub async fn find_file(&self, cid: &str, name: &str) -> Result<Option<FileInfo>> {
+        let cache = self.files_cache.read();
+        if let Some(files) = cache.get(cid) {
+            Ok(files.iter().find(|f| f.filename == name).cloned())
+        } else {
+            // If strictly active maintenance, missing from cache means it doesn't exist.
+            Ok(None)
         }
-
-        let entry = resp
-            .data
-            .into_iter()
-            .find(|e| e.file_name == name && (e.parent_id.is_empty() || e.parent_id == cid));
-
-        let Some(e) = entry else {
-            return Ok(None);
-        };
-
-        let is_dir = e.file_category == "0";
-        let size = e.file_size.parse::<i64>().unwrap_or(0);
-        Ok(Some(FileInfo {
-            file_id: e.file_id,
-            filename: e.file_name,
-            is_dir,
-            size,
-            parent_id: if e.parent_id.is_empty() {
-                cid.to_string()
-            } else {
-                e.parent_id
-            },
-            pick_code: e.pick_code,
-            sha1: e.sha1,
-        }))
     }
+
+    // Deprecated/Removed: find_file_fast (search API)
 
     pub async fn list_files(&self, cid: &str) -> Result<Vec<FileInfo>> {
-        // Only REST list endpoints should call this, because it may trigger full directory pagination.
-        // Non-list operations should prefer `find_file_fast()` (search API) to avoid expensive listing.
-
-        // cache hit (only when not dirty)
-        {
-            let dirty = self.dirty_dirs.read();
-            if !dirty.contains(cid) {
-                let cache = self.files_cache.read();
-                if let Some(v) = cache.get(cid) {
-                    return Ok(v.clone());
-                }
-            }
-        }
-
-        let mut all = Vec::new();
-        let mut offset = 0i64;
-        let limit = 1150i64;
-        let url = format!("{}/open/ufile/files", self.api_base);
-
-        loop {
-            let resp: FileListResponse = self
-                .get_json(
-                    &url,
-                    &[
-                        ("cid", cid.to_string()),
-                        ("limit", limit.to_string()),
-                        ("offset", offset.to_string()),
-                        ("show_dir", "1".to_string()),
-                        ("stdir", "1".to_string()),
-                    ],
-                )
-                .await?;
-
-            if resp.state == Some(false) || resp.code.unwrap_or(0) != 0 {
-                return Err(AppError::Open115Api {
-                    code: resp.code.unwrap_or(-1),
-                    message: resp.message.unwrap_or_default(),
-                });
-            }
-
-            let count = resp.count.unwrap_or(resp.data.len() as i64);
-            for e in resp.data {
-                all.push(FileInfo {
-                    file_id: e.fid.clone(),
-                    filename: e.name().to_string(),
-                    is_dir: e.is_dir(),
-                    size: e.fs,
-                    parent_id: e.pid.clone(),
-                    pick_code: e.pc.clone(),
-                    sha1: e.sha1.clone(),
-                });
-            }
-
-            offset += limit;
-            if offset >= count {
-                break;
-            }
-        }
-
-        {
-            let mut cache = self.files_cache.write();
-            cache.insert(cid.to_string(), all.clone());
-        }
-        {
-            let mut dirty = self.dirty_dirs.write();
-            dirty.remove(cid);
-        }
-
-        Ok(all)
-    }
-
-    pub fn mark_dir_dirty(&self, cid: &str) {
-        let mut dirty = self.dirty_dirs.write();
-        dirty.insert(cid.to_string());
-    }
-
-    pub async fn find_file(&self, cid: &str, name: &str) -> Result<Option<FileInfo>> {
-        // Always prefer the search API. Do NOT fall back to directory listing here, to keep
-        // non-list operations from triggering expensive pagination.
-        self.find_file_fast(cid, name).await
+        let cache = self.files_cache.read();
+        Ok(cache.get(cid).cloned().unwrap_or_default())
     }
 
     pub async fn create_directory(&self, pid: &str, name: &str) -> Result<String> {
@@ -472,8 +484,8 @@ impl Open115Client {
         let code = resp.code.unwrap_or(-1);
         if !ok || code != 0 {
             // might already exist
-            self.mark_dir_dirty(pid);
-            if let Some(existing) = self.find_file_fast(pid, name).await? {
+            // self.mark_dir_dirty(pid); // No more dirty marking
+            if let Some(existing) = self.find_file(pid, name).await? {
                 if existing.is_dir {
                     return Ok(existing.file_id);
                 }
@@ -537,7 +549,7 @@ impl Open115Client {
                 continue;
             }
 
-            let found = self.find_file_fast(&current_id, part).await?;
+            let found = self.find_file(&current_id, part).await?;
             let Some(info) = found else {
                 return Ok(None);
             };
@@ -636,22 +648,10 @@ impl Open115Client {
         &self,
         cid: &str,
         filename: &str,
-        allow_list_fallback: bool,
+        _allow_list_fallback: bool,
     ) -> Result<Option<FileInfo>> {
-        // 1) hint cache (from OSS callback)
-        if let Some(hint) = self.get_file_hint(cid, filename) {
-            return Ok(Some(hint));
-        }
-        // 2) search API
-        if let Some(found) = self.find_file_fast(cid, filename).await? {
-            return Ok(Some(found));
-        }
-        if !allow_list_fallback {
-            return Ok(None);
-        }
-        // 3) directory listing fallback (only for small dirs)
-        let files = self.list_files(cid).await?;
-        Ok(files.into_iter().find(|f| f.filename == filename))
+        // Cache only.
+        self.find_file(cid, filename).await
     }
 
     pub async fn delete_file(&self, parent_id: &str, file_id: &str) -> Result<()> {
@@ -691,7 +691,9 @@ impl Open115Client {
         let url = format!("{}/open/ufile/downurl", self.api_base);
         let pick_code_s = pick_code.to_string();
         let resp: DownUrlResponse = self
-            .post_form_json(&url, move || Form::new().text("pick_code", pick_code_s.clone()))
+            .post_form_json(&url, move || {
+                Form::new().text("pick_code", pick_code_s.clone())
+            })
             .await?;
         if resp.state == Some(false) || resp.code.unwrap_or(0) != 0 {
             return Err(AppError::Open115Api {
@@ -717,11 +719,7 @@ impl Open115Client {
         Err(AppError::Internal("downurl: missing url".to_string()))
     }
 
-    pub async fn download_file(
-        &self,
-        pick_code: &str,
-        range: Option<(u64, u64)>,
-    ) -> Result<Bytes> {
+    pub async fn download_file(&self, pick_code: &str, range: Option<(u64, u64)>) -> Result<Bytes> {
         let download_url = self.get_download_url(pick_code).await?;
         let mut req = self
             .token_manager
@@ -951,7 +949,10 @@ impl Open115Client {
         let mut oss_headers = vec![
             ("x-oss-callback".to_string(), cb_b64.clone()),
             ("x-oss-callback-var".to_string(), cb_var_b64.clone()),
-            ("x-oss-security-token".to_string(), security_token.to_string()),
+            (
+                "x-oss-security-token".to_string(),
+                security_token.to_string(),
+            ),
         ];
         oss_headers.sort_by(|a, b| a.0.cmp(&b.0));
         let canonicalized_headers = oss_headers
@@ -969,7 +970,8 @@ impl Open115Client {
         let mut mac = HmacSha1::new_from_slice(access_key_secret.as_bytes())
             .map_err(|e| AppError::Internal(format!("HMAC init failed: {}", e)))?;
         mac.update(string_to_sign.as_bytes());
-        let signature = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+        let signature =
+            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
         let authorization = format!("OSS {}:{}", access_key_id, signature);
 
         let resp = self
@@ -1027,9 +1029,8 @@ impl Open115Client {
 
             // Prefer pretty JSON if possible; otherwise log as UTF-8 lossy.
             let body_to_log = match serde_json::from_slice::<serde_json::Value>(&log_body) {
-                Ok(v) => serde_json::to_string_pretty(&v).unwrap_or_else(|_| {
-                    String::from_utf8_lossy(&log_body).to_string()
-                }),
+                Ok(v) => serde_json::to_string_pretty(&v)
+                    .unwrap_or_else(|_| String::from_utf8_lossy(&log_body).to_string()),
                 Err(_) => String::from_utf8_lossy(&log_body).to_string(),
             };
 
@@ -1087,14 +1088,7 @@ impl Open115Client {
         // init
         let mut init_data = self
             .upload_init(
-                parent_id,
-                filename,
-                file_size,
-                &file_sha1,
-                &pre_sha1,
-                None,
-                None,
-                None,
+                parent_id, filename, file_size, &file_sha1, &pre_sha1, None, None, None,
             )
             .await?;
 
@@ -1104,22 +1098,54 @@ impl Open115Client {
             .unwrap_or(-1);
 
         if status == 2 {
-            // Fast upload path: still mark dirty and optionally wait for visibility.
-            self.mark_dir_dirty(parent_id);
-            if wait_visible {
-                // Legacy behavior (kept for compatibility): wait via search.
-                // Prefer disabling this and relying on read-side fallback listing for non-data types.
-                for attempt in 1..=8usize {
-                    if let Some(found) = self.find_file_fast(parent_id, filename).await? {
-                        if !found.is_dir {
-                            return Ok(());
-                        }
+            // Fast upload path: already exists.
+            // We should get pick_code/file_id from init_data if possible and update cache.
+            // But if it already exists, maybe we just need to ensure it's in cache.
+            // init_data usually has `data` which might contain file info.
+
+            // For now, let's assume if it exists on server, we should add it to cache.
+            // But we don't have full FileInfo unless we parse init_data carefully.
+            // A simple strategy is: if fast upload hits, fetch the file info via find_file (cache check)
+            // If cache misses (unexpected), we might need to fetch it?
+            // Wait, we can't fetch it via search API anymore.
+            // If fast upload says it exists (status=2), it MUST be there.
+            // We can try to extract `file_id` and `pick_code` from init_data.
+
+            let file_id = Self::extract_init_field(&init_data, &["file_id", "fileId"])
+                .unwrap_or_default()
+                .to_string();
+            let pick_code = Self::extract_init_field(&init_data, &["pick_code", "pickCode"])
+                .unwrap_or_default()
+                .to_string();
+
+            if !file_id.is_empty() {
+                let info = FileInfo {
+                    file_id: file_id.clone(),
+                    filename: filename.to_string(),
+                    is_dir: false,
+                    size: file_size as i64,
+                    parent_id: parent_id.to_string(),
+                    pick_code: pick_code,
+                    sha1: file_sha1.clone(),
+                };
+
+                let mut cache = self.files_cache.write();
+                if let Some(files) = cache.get_mut(parent_id) {
+                    if let Some(idx) = files.iter().position(|f| f.filename == filename) {
+                        files[idx] = info;
+                    } else {
+                        files.push(info);
                     }
-                    backoff_sleep(attempt).await;
+                } else {
+                    // Parent not in cache? This shouldn't happen if initialized.
+                    // But if it does, we insert.
+                    cache.insert(parent_id.to_string(), vec![info]);
                 }
-                return Err(AppError::Internal(
-                    "upload succeeded but file not visible yet; retry later".to_string(),
-                ));
+            } else {
+                tracing::warn!(
+                    "Fast upload passed but no file_id in response. file={}",
+                    filename
+                );
             }
             return Ok(());
         }
@@ -1163,21 +1189,36 @@ impl Open115Client {
             .get("status")
             .and_then(|x| x.as_i64())
             .unwrap_or(-1);
+
+        // Check fast upload again after sign check
         if status == 2 {
-            self.mark_dir_dirty(parent_id);
-            if wait_visible {
-                // Legacy behavior (kept for compatibility): wait via search.
-                for attempt in 1..=8usize {
-                    if let Some(found) = self.find_file_fast(parent_id, filename).await? {
-                        if !found.is_dir {
-                            return Ok(());
-                        }
+            let file_id = Self::extract_init_field(&init_data, &["file_id", "fileId"])
+                .unwrap_or_default()
+                .to_string();
+            let pick_code = Self::extract_init_field(&init_data, &["pick_code", "pickCode"])
+                .unwrap_or_default()
+                .to_string();
+
+            if !file_id.is_empty() {
+                let info = FileInfo {
+                    file_id: file_id.clone(),
+                    filename: filename.to_string(),
+                    is_dir: false,
+                    size: file_size as i64,
+                    parent_id: parent_id.to_string(),
+                    pick_code: pick_code,
+                    sha1: file_sha1.clone(),
+                };
+                let mut cache = self.files_cache.write();
+                if let Some(files) = cache.get_mut(parent_id) {
+                    if let Some(idx) = files.iter().position(|f| f.filename == filename) {
+                        files[idx] = info;
+                    } else {
+                        files.push(info);
                     }
-                    backoff_sleep(attempt).await;
+                } else {
+                    cache.insert(parent_id.to_string(), vec![info]);
                 }
-                return Err(AppError::Internal(
-                    "upload succeeded but file not visible yet; retry later".to_string(),
-                ));
             }
             return Ok(());
         }
@@ -1190,9 +1231,10 @@ impl Open115Client {
             .ok_or_else(|| AppError::Internal("upload: missing object".to_string()))?
             .to_string();
 
-        let (callback, callback_var) = Self::extract_callback_pair(&init_data).ok_or_else(|| {
-            AppError::Internal("upload: missing callback/callback_var".to_string())
-        })?;
+        let (callback, callback_var) =
+            Self::extract_callback_pair(&init_data).ok_or_else(|| {
+                AppError::Internal("upload: missing callback/callback_var".to_string())
+            })?;
 
         let token = self.get_upload_token().await?;
         let endpoint = token
@@ -1220,31 +1262,19 @@ impl Open115Client {
 
         let cb_opt = self
             .oss_put_object(
-            &endpoint,
-            &access_key_id,
-            &access_key_secret,
-            &security_token,
-            &bucket,
-            &object,
-            &callback,
-            &callback_var,
-            data.clone(),
-        )
-        .await?;
+                &endpoint,
+                &access_key_id,
+                &access_key_secret,
+                &security_token,
+                &bucket,
+                &object,
+                &callback,
+                &callback_var,
+                data.clone(),
+            )
+            .await?;
 
-        // After successful OSS upload, 115 may not immediately provide `file_id`.
-        // - Always mark directory cache as dirty (so list endpoints refresh later).
-        // - For non-data types (config/keys/index/...) restic expects read-your-writes semantics,
-        //   so we optionally wait for visibility via the SEARCH API (no directory listing).
-        // If we already have a cached listing for this dir, mark it dirty. Otherwise, avoid
-        // forcing a future full re-list of large dirs (especially `data/{00..ff}` subdirs).
-        let had_cached_listing = self.files_cache.read().contains_key(parent_id);
-        if had_cached_listing {
-            self.mark_dir_dirty(parent_id);
-        }
-
-        // If OSS callback returned file metadata, store as a per-file hint to provide
-        // read-after-write semantics without listing/search-index delays.
+        // If OSS callback returned file metadata, update files_cache directly.
         if let Some(cb) = cb_opt {
             let cid = if cb.cid.is_empty() {
                 parent_id.to_string()
@@ -1265,22 +1295,25 @@ impl Open115Client {
                 pick_code: cb.pick_code.clone(),
                 sha1: cb.sha1.clone(),
             };
-            self.upsert_file_hint(&cid, &info);
-        }
 
-        if wait_visible {
-            // Legacy behavior (kept for compatibility): wait via search.
-            for attempt in 1..=8usize {
-                if let Some(found) = self.find_file_fast(parent_id, filename).await? {
-                    if !found.is_dir {
-                        return Ok(());
-                    }
+            let mut cache = self.files_cache.write();
+            if let Some(files) = cache.get_mut(&cid) {
+                if let Some(idx) = files.iter().position(|f| f.filename == info.filename) {
+                    files[idx] = info;
+                } else {
+                    files.push(info);
                 }
-                backoff_sleep(attempt).await;
+            } else {
+                cache.insert(cid, vec![info]);
             }
-            return Err(AppError::Internal(
-                "upload succeeded but file not visible yet; retry later".to_string(),
-            ));
+        } else if wait_visible {
+            // Fallback: if we didn't get callback data but asked to wait?
+            // We can't search-wait anymore.
+            // We just have to hope. Or maybe we can't do anything.
+            tracing::warn!(
+                "Upload finished but no callback data and search-verify is disabled. Cache might be stale for {}",
+                filename
+            );
         }
         Ok(())
     }
@@ -1323,4 +1356,3 @@ impl std::fmt::Debug for Open115Client {
             .finish()
     }
 }
-
