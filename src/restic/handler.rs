@@ -140,7 +140,7 @@ async fn post_config(
 
     tracing::info!("Saving config ({} bytes)", body.len());
     let dir_id = state.client.get_type_dir_id(ResticFileType::Config).await?;
-    // Config is immediately read by restic; wait for visibility (via search API, no dir listing).
+    // Config is immediately read by restic; local cache is updated by upload_file.
     state.client.upload_file(&dir_id, "config", body).await?;
     Ok(StatusCode::OK)
 }
@@ -419,7 +419,7 @@ async fn delete_file(
     };
 
     if let Some(file) = state.client.find_file(&dir_id, &name).await? {
-        // Best-effort: clear in-memory hint cache for this file.
+        // Best-effort: delete_file handles API call and local cache removal.
 
         state.client.delete_file(&dir_id, &file.file_id).await?;
     }
