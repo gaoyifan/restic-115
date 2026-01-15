@@ -26,7 +26,9 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Listen address: {}", config.listen_addr);
 
     let client = Open115Client::new(config.clone()).await?;
-    client.warm_cache().await?;
+    if config.force_cache_rebuild {
+        client.warm_cache().await?;
+    }
 
     let app = create_router(client).layer(TraceLayer::new_for_http());
     let addr: SocketAddr = config.listen_addr.parse()?;

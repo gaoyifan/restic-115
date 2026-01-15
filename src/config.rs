@@ -28,7 +28,11 @@ pub struct Config {
     pub log_level: String,
 
     /// 115 Open Platform API base URL for file operations
-    #[arg(long, env = "OPEN115_API_BASE", default_value = "https://proapi.115.com")]
+    #[arg(
+        long,
+        env = "OPEN115_API_BASE",
+        default_value = "https://proapi.115.com"
+    )]
     pub api_base: String,
 
     /// User-Agent used when calling 115 APIs and downloading files
@@ -42,5 +46,8 @@ pub struct Config {
         default_value = "https://api.oplist.org/115cloud/callback"
     )]
     pub callback_server: String,
-}
 
+    /// Skip cache initialization on startup
+    #[arg(long, env = "OPEN115_FORCE_CACHE_REBUILD", default_value = "false")]
+    pub force_cache_rebuild: bool,
+}
