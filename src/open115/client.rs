@@ -115,7 +115,8 @@ impl Open115Client {
             // find directory in root_files to get ID
             if let Some(dir_info) = root_files
                 .iter()
-                .find(|f| f.filename == dirname && f.is_dir)
+                .filter(|f| f.filename == dirname && f.is_dir)
+                .max_by_key(|f| &f.file_id)
             {
                 let dir_id = &dir_info.file_id;
                 // Add to dir_cache
@@ -140,7 +141,11 @@ impl Open115Client {
         }
 
         // 4. Handle data directory and its 256 subdirectories
-        if let Some(data_dir) = root_files.iter().find(|f| f.filename == "data" && f.is_dir) {
+        if let Some(data_dir) = root_files
+            .iter()
+            .filter(|f| f.filename == "data" && f.is_dir)
+            .max_by_key(|f| &f.file_id)
+        {
             let data_id = &data_dir.file_id;
             let full_path = format!("{}/data", self.repo_path);
             self.dir_cache.write().insert(full_path, data_id.clone());
@@ -416,7 +421,11 @@ impl Open115Client {
     pub async fn find_file(&self, cid: &str, name: &str) -> Result<Option<FileInfo>> {
         let cache = self.files_cache.read();
         if let Some(files) = cache.get(cid) {
-            Ok(files.iter().find(|f| f.filename == name).cloned())
+            Ok(files
+                .iter()
+                .filter(|f| f.filename == name)
+                .max_by_key(|f| &f.file_id)
+                .cloned())
         } else {
             // If strictly active maintenance, missing from cache means it doesn't exist.
             Ok(None)
@@ -1216,7 +1225,7 @@ impl Open115Client {
             )
             .await?;
 
-        // If OSS callback returned file metadata, update files_cache directly.
+        // If OSS callback returned file metadata, update files_cache and clean up.
         if let Some(cb) = cb_opt {
             let info = FileInfo {
                 file_id: cb.file_id.clone(),
@@ -1230,9 +1239,13 @@ impl Open115Client {
                 pick_code: cb.pick_code.clone(),
             };
 
-            self.handle_upload_success(parent_id, info).await?;
+            self.handle_upload_success(parent_id, info).await
+        } else {
+            Err(AppError::Internal(
+                "OSS upload completed but server failed to return file metadata via callback"
+                    .to_string(),
+            ))
         }
-        Ok(())
     }
 
     pub async fn init_repository(&self) -> Result<()> {
