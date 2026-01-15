@@ -25,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Repository path: {}", config.repo_path);
     tracing::info!("Listen address: {}", config.listen_addr);
 
-    let client = Open115Client::new(config.clone());
+    let client = Open115Client::new(config.clone()).await?;
     client.warm_cache().await?;
 
     let app = create_router(client).layer(TraceLayer::new_for_http());

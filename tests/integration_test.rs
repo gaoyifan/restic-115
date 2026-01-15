@@ -35,9 +35,9 @@ macro_rules! skip_if_no_tokens {
     };
 }
 
-fn make_test_client(repo_path: &str) -> Option<Open115Client> {
+async fn make_test_client(repo_path: &str) -> Option<Open115Client> {
     let (access, refresh) = get_test_tokens()?;
-    Some(Open115Client::new(Config {
+    Open115Client::new(Config {
         access_token: Some(access),
         refresh_token: Some(refresh),
         repo_path: repo_path.to_string(),
@@ -46,7 +46,9 @@ fn make_test_client(repo_path: &str) -> Option<Open115Client> {
         api_base: "https://proapi.115.com".to_string(),
         user_agent: "restic-115-tests".to_string(),
         callback_server: "https://api.oplist.org/115cloud/callback".to_string(),
-    }))
+    })
+    .await
+    .ok()
 }
 
 fn unique_repo_path(prefix: &str) -> String {
@@ -58,13 +60,16 @@ async fn test_refresh_token() {
     skip_if_no_tokens!();
     init_tracing_once();
     let repo_path = unique_repo_path("restic-115-integration");
-    let client = make_test_client(&repo_path).unwrap();
+    let client = make_test_client(&repo_path).await.unwrap();
 
     // A cheap call: try to list root. If access token is stale, refresh-on-401 should fix it.
     let files = client.list_files("0").await;
     if let Err(e) = files {
         // Token refresh may be rate limited by 115; don't fail the whole suite on this.
-        eprintln!("Skipping test_refresh_token due to API/token state: {:?}", e);
+        eprintln!(
+            "Skipping test_refresh_token due to API/token state: {:?}",
+            e
+        );
         return;
     }
 }
@@ -74,7 +79,7 @@ async fn test_create_list_delete_directory() {
     skip_if_no_tokens!();
     init_tracing_once();
     let repo_path = unique_repo_path("restic-115-integration-dir");
-    let client = make_test_client(&repo_path).unwrap();
+    let client = make_test_client(&repo_path).await.unwrap();
 
     let dir_id = match client.ensure_path(&repo_path).await {
         Ok(id) => id,
@@ -96,7 +101,7 @@ async fn test_upload_and_download_small_file() {
     skip_if_no_tokens!();
     init_tracing_once();
     let repo_path = unique_repo_path("restic-115-integration-upload");
-    let client = make_test_client(&repo_path).unwrap();
+    let client = make_test_client(&repo_path).await.unwrap();
 
     let dir_id = match client.ensure_path(&repo_path).await {
         Ok(id) => id,
@@ -116,7 +121,7 @@ async fn test_upload_and_download_small_file() {
         chrono::Utc::now().timestamp_millis()
     ));
     let uploaded = client
-        .upload_file(&dir_id, "hello.txt", content.clone(), true)
+        .upload_file(&dir_id, "hello.txt", content.clone())
         .await;
     if let Err(e) = uploaded {
         eprintln!("Upload failed (maybe API shape changed): {:?}", e);
@@ -129,8 +134,8 @@ async fn test_upload_and_download_small_file() {
         .expect("get_file_info failed")
         .expect("file not found after upload");
     eprintln!(
-        "search result: parent_id={}, file_id={}, pick_code={}, sha1={}",
-        info.parent_id, info.file_id, info.pick_code, info.sha1
+        "search result: file_id={}, pick_code={}",
+        info.file_id, info.pick_code
     );
 
     let downloaded = client
@@ -142,4 +147,3 @@ async fn test_upload_and_download_small_file() {
     let _ = client.delete_file(&dir_id, &info.file_id).await;
     let _ = client.delete_file("0", &dir_id).await;
 }
-

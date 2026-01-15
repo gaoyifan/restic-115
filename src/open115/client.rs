@@ -1,17 +1,15 @@
 //! 115 Open Platform API client for file operations.
 
+use super::database::{entities, init_db};
 use base64::Engine;
 use bytes::Bytes;
 use chrono::Utc;
 use hmac::{Hmac, Mac};
-use parking_lot::RwLock;
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::multipart::Form;
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde_json::Value;
 use sha1::Digest;
-use std::collections::HashMap;
-
-use std::sync::Arc;
 use std::time::Duration;
 
 use super::ResticFileType;
@@ -66,23 +64,31 @@ pub struct Open115Client {
     api_base: String,
     repo_path: String,
     user_agent: String,
-
-    /// Cache of directory IDs: path -> cid
-    dir_cache: Arc<RwLock<HashMap<String, String>>>,
-    /// Cache of directory listing: cid -> entries
-    files_cache: Arc<RwLock<HashMap<String, Vec<FileInfo>>>>,
+    db: DatabaseConnection,
 }
 
 impl Open115Client {
-    pub fn new(cfg: Config) -> Self {
-        Self {
-            token_manager: TokenManager::new(cfg.access_token.clone(), cfg.refresh_token.clone()),
+    pub async fn new(cfg: Config) -> Result<Self> {
+        // Use a default DB name or from config if we added it (using default for now)
+        let db_url = "sqlite:restic-115-cache.db?mode=rwc";
+        let db = init_db(db_url)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to init DB: {e}")))?;
+
+        let token_manager = TokenManager::new(
+            db.clone(),
+            cfg.access_token.clone(),
+            cfg.refresh_token.clone(),
+        )
+        .await?;
+
+        Ok(Self {
+            token_manager,
             api_base: cfg.api_base.trim_end_matches('/').to_string(),
             repo_path: cfg.repo_path,
             user_agent: cfg.user_agent,
-            dir_cache: Arc::new(RwLock::new(HashMap::new())),
-            files_cache: Arc::new(RwLock::new(HashMap::new())),
-        }
+            db,
+        })
     }
     /// Recursively warm up the cache.
     pub async fn warm_cache(&self) -> Result<()> {
@@ -95,16 +101,10 @@ impl Open115Client {
 
         // 2. Fetch and cache root files
         let root_files = self.fetch_files_from_api(&repo_id).await?;
-        {
-            let mut cache = self.files_cache.write();
-            cache.insert(repo_id.clone(), root_files.clone());
-        }
+        self.save_files_to_db(&repo_id, &root_files).await?;
         tracing::info!("Cached {} items at repository root", root_files.len());
 
         // 3. Handle standard directories (keys, locks, snapshots, index, config)
-        // Config is strictly a file in root, but ResticFileType::Config maps to root dir in our helper logic usually.
-        // Actually ResticFileType::Config logic in get_type_dir_id returns repo_path.
-        // Let's iterate standard dirs that are subdirectories.
         for file_type in [
             ResticFileType::Keys,
             ResticFileType::Locks,
@@ -121,21 +121,13 @@ impl Open115Client {
                 let dir_id = &dir_info.file_id;
                 // Add to dir_cache
                 let full_path = format!("{}/{}", self.repo_path, dirname);
-                self.dir_cache.write().insert(full_path, dir_id.clone());
+                self.save_dir_to_db(&full_path, dir_id).await?;
 
                 // Fetch content
                 let files = self.fetch_files_from_api(dir_id).await?;
-
-                self.files_cache
-                    .write()
-                    .insert(dir_id.clone(), files.clone());
+                self.save_files_to_db(dir_id, &files).await?;
                 tracing::info!("Cached {} items in /{}", files.len(), dirname);
             } else {
-                // Create it? Or just log? require_repo usually means it should exist.
-                // But for a new repo, we might be initializing.
-                // The `init_repository` should have run or will run.
-                // If we are just starting active maintenance, we assume they might exist.
-                // If not found, we don't cache anything for them yet.
                 tracing::debug!("Directory /{} not found in root, skipping warmup", dirname);
             }
         }
@@ -148,31 +140,22 @@ impl Open115Client {
         {
             let data_id = &data_dir.file_id;
             let full_path = format!("{}/data", self.repo_path);
-            self.dir_cache.write().insert(full_path, data_id.clone());
+            self.save_dir_to_db(&full_path, data_id).await?;
 
             let data_subdirs = self.fetch_files_from_api(data_id).await?;
-            self.files_cache
-                .write()
-                .insert(data_id.clone(), data_subdirs.clone());
+            self.save_files_to_db(data_id, &data_subdirs).await?;
             tracing::info!("Cached /data directory: {} items", data_subdirs.len());
 
             let mut total_data_files = 0;
             // Iterate 00..ff
             for subdir in data_subdirs {
                 if subdir.is_dir {
-                    // We expect 00, 01, ..., ff
-                    // Check if it matches hex pattern? Or just cache everything? Cache everything.
-
                     // Add to dir_cache
                     let sub_path = format!("{}/data/{}", self.repo_path, subdir.filename);
-                    self.dir_cache
-                        .write()
-                        .insert(sub_path, subdir.file_id.clone());
+                    self.save_dir_to_db(&sub_path, &subdir.file_id).await?;
 
                     let files = self.fetch_files_from_api(&subdir.file_id).await?;
-                    self.files_cache
-                        .write()
-                        .insert(subdir.file_id.clone(), files.clone());
+                    self.save_files_to_db(&subdir.file_id, &files).await?;
                     total_data_files += files.len();
                 }
             }
@@ -185,7 +168,6 @@ impl Open115Client {
         Ok(())
     }
 
-    /// Fetch files from 115 API (internal use only, for warmup/refresh).
     async fn fetch_files_from_api(&self, cid: &str) -> Result<Vec<FileInfo>> {
         let mut all = Vec::new();
         let mut offset = 0i64;
@@ -230,6 +212,68 @@ impl Open115Client {
             }
         }
         Ok(all)
+    }
+
+    async fn save_files_to_db(&self, parent_id: &str, files: &[FileInfo]) -> Result<()> {
+        use sea_orm::{TransactionTrait, sea_query::OnConflict};
+
+        let txn = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| AppError::Internal(format!("DB begin fail: {e}")))?;
+
+        // Delete existing files for this parent to avoid stale entries
+        // Alternatively, use Upsert. Given the requirements, overwriting for this parent seems safest.
+        entities::cached_files::Entity::delete_many()
+            .filter(entities::cached_files::Column::ParentId.eq(parent_id))
+            .exec(&txn)
+            .await
+            .map_err(|e| AppError::Internal(format!("DB delete fail: {e}")))?;
+
+        for f in files {
+            let am = entities::cached_files::ActiveModel {
+                file_id: Set(f.file_id.clone()),
+                parent_id: Set(parent_id.to_string()),
+                filename: Set(f.filename.clone()),
+                is_dir: Set(f.is_dir),
+                size: Set(f.size),
+                pick_code: Set(f.pick_code.clone()),
+            };
+            entities::cached_files::Entity::insert(am)
+                .on_conflict(
+                    OnConflict::column(entities::cached_files::Column::FileId)
+                        .update_columns([
+                            entities::cached_files::Column::ParentId,
+                            entities::cached_files::Column::Filename,
+                            entities::cached_files::Column::IsDir,
+                            entities::cached_files::Column::Size,
+                            entities::cached_files::Column::PickCode,
+                        ])
+                        .to_owned(),
+                )
+                .exec(&txn)
+                .await
+                .map_err(|e| AppError::Internal(format!("DB insert fail: {e}")))?;
+        }
+
+        txn.commit()
+            .await
+            .map_err(|e| AppError::Internal(format!("DB commit fail: {e}")))?;
+        Ok(())
+    }
+
+    async fn save_dir_to_db(&self, path: &str, file_id: &str) -> Result<()> {
+        let am = entities::cached_dirs::ActiveModel {
+            id: sea_orm::ActiveValue::NotSet,
+            path: Set(path.to_string()),
+            file_id: Set(file_id.to_string()),
+        };
+        entities::cached_dirs::Entity::insert(am)
+            .exec(&self.db)
+            .await
+            .map_err(|e| AppError::Internal(format!("DB dir save fail: {e}")))?;
+        Ok(())
     }
 
     fn require_tokens(&self) -> Result<()> {
@@ -419,24 +463,43 @@ impl Open115Client {
 
     /// Find a file/dir by exact name under a directory using the cache.
     pub async fn find_file(&self, cid: &str, name: &str) -> Result<Option<FileInfo>> {
-        let cache = self.files_cache.read();
-        if let Some(files) = cache.get(cid) {
-            Ok(files
-                .iter()
-                .filter(|f| f.filename == name)
-                .max_by_key(|f| &f.file_id)
-                .cloned())
-        } else {
-            // If strictly active maintenance, missing from cache means it doesn't exist.
-            Ok(None)
-        }
+        let res = entities::cached_files::Entity::find()
+            .filter(entities::cached_files::Column::ParentId.eq(cid))
+            .filter(entities::cached_files::Column::Filename.eq(name))
+            .all(&self.db)
+            .await
+            .map_err(|e| AppError::Internal(format!("DB find_file fail: {e}")))?;
+
+        // Pick largest file_id if multiple (fault tolerance)
+        Ok(res
+            .into_iter()
+            .max_by_key(|f| f.file_id.clone())
+            .map(|f| FileInfo {
+                file_id: f.file_id,
+                filename: f.filename,
+                is_dir: f.is_dir,
+                size: f.size,
+                pick_code: f.pick_code,
+            }))
     }
 
-    // Deprecated/Removed: find_file_fast (search API)
-
     pub async fn list_files(&self, cid: &str) -> Result<Vec<FileInfo>> {
-        let cache = self.files_cache.read();
-        Ok(cache.get(cid).cloned().unwrap_or_default())
+        let res = entities::cached_files::Entity::find()
+            .filter(entities::cached_files::Column::ParentId.eq(cid))
+            .all(&self.db)
+            .await
+            .map_err(|e| AppError::Internal(format!("DB list_files fail: {e}")))?;
+
+        Ok(res
+            .into_iter()
+            .map(|f| FileInfo {
+                file_id: f.file_id,
+                filename: f.filename,
+                is_dir: f.is_dir,
+                size: f.size,
+                pick_code: f.pick_code,
+            })
+            .collect())
     }
 
     pub async fn create_directory(&self, pid: &str, name: &str) -> Result<String> {
@@ -472,17 +535,18 @@ impl Open115Client {
             .ok_or_else(|| AppError::Internal("mkdir succeeded but no file_id".to_string()))?;
 
         // update caches
-        {
-            let mut cache = self.files_cache.write();
-            cache.entry(pid.to_string()).or_default().push(FileInfo {
-                file_id: id.clone(),
-                filename: name.to_string(),
-                is_dir: true,
-                size: 0,
-                pick_code: String::new(),
-            });
-            cache.insert(id.clone(), Vec::new());
-        }
+        let am = entities::cached_files::ActiveModel {
+            file_id: Set(id.clone()),
+            parent_id: Set(pid.to_string()),
+            filename: Set(name.to_string()),
+            is_dir: Set(true),
+            size: Set(0),
+            pick_code: Set(String::new()),
+        };
+        entities::cached_files::Entity::insert(am)
+            .exec(&self.db)
+            .await
+            .map_err(|e| AppError::Internal(format!("DB create_dir fail: {e}")))?;
 
         Ok(id)
     }
@@ -492,11 +556,14 @@ impl Open115Client {
         if path.is_empty() || path == "/" {
             return Ok(Some("0".to_string()));
         }
-        {
-            let cache = self.dir_cache.read();
-            if let Some(id) = cache.get(path) {
-                return Ok(Some(id.clone()));
-            }
+        let res = entities::cached_dirs::Entity::find()
+            .filter(entities::cached_dirs::Column::Path.eq(path))
+            .one(&self.db)
+            .await
+            .map_err(|e| AppError::Internal(format!("DB find_path_id fail: {e}")))?;
+
+        if let Some(row) = res {
+            return Ok(Some(row.file_id));
         }
 
         let parts: Vec<&str> = path
@@ -512,8 +579,14 @@ impl Open115Client {
             current_path.push('/');
             current_path.push_str(part);
 
-            if let Some(cached) = self.dir_cache.read().get(&current_path).cloned() {
-                current_id = cached;
+            let res = entities::cached_dirs::Entity::find()
+                .filter(entities::cached_dirs::Column::Path.eq(&current_path))
+                .one(&self.db)
+                .await
+                .map_err(|e| AppError::Internal(format!("DB in loop fail: {e}")))?;
+
+            if let Some(row) = res {
+                current_id = row.file_id;
                 continue;
             }
 
@@ -525,9 +598,7 @@ impl Open115Client {
                 return Ok(None);
             }
             current_id = info.file_id.clone();
-            self.dir_cache
-                .write()
-                .insert(current_path.clone(), current_id.clone());
+            self.save_dir_to_db(&current_path, &current_id).await?;
         }
 
         Ok(Some(current_id))
@@ -548,7 +619,7 @@ impl Open115Client {
             current_path.push('/');
             current_path.push_str(part);
 
-            if let Some(id) = self.dir_cache.read().get(&current_path).cloned() {
+            if let Some(id) = self.find_path_id(&current_path).await? {
                 current_id = id;
                 continue;
             }
@@ -557,9 +628,7 @@ impl Open115Client {
             // If it already exists, create_directory() will resolve the existing id via a cheap search.
             let new_id = self.create_directory(&current_id, part).await?;
             current_id = new_id.clone();
-            self.dir_cache
-                .write()
-                .insert(current_path.clone(), current_id.clone());
+            self.save_dir_to_db(&current_path, &current_id).await?;
         }
 
         Ok(current_id)
@@ -630,12 +699,10 @@ impl Open115Client {
         }
 
         // update cache
-        {
-            let mut cache = self.files_cache.write();
-            if let Some(files) = cache.get_mut(parent_id) {
-                files.retain(|f| f.file_id != file_id);
-            }
-        }
+        entities::cached_files::Entity::delete_by_id(file_id.to_string())
+            .exec(&self.db)
+            .await
+            .map_err(|e| AppError::Internal(format!("DB delete_file fail: {e}")))?;
 
         Ok(())
     }
@@ -1007,18 +1074,13 @@ impl Open115Client {
     }
 
     async fn handle_upload_success(&self, parent_id: &str, info: FileInfo) -> Result<()> {
-        let to_delete = {
-            let cache = self.files_cache.read();
-            if let Some(files) = cache.get(&parent_id.to_string()) {
-                files
-                    .iter()
-                    .filter(|f| f.filename == info.filename && f.file_id != info.file_id)
-                    .cloned()
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            }
-        };
+        let to_delete = entities::cached_files::Entity::find()
+            .filter(entities::cached_files::Column::ParentId.eq(parent_id))
+            .filter(entities::cached_files::Column::Filename.eq(&info.filename))
+            .filter(entities::cached_files::Column::FileId.ne(&info.file_id))
+            .all(&self.db)
+            .await
+            .map_err(|e| AppError::Internal(format!("DB find dups fail: {e}")))?;
 
         for dup in to_delete {
             tracing::info!(
@@ -1028,7 +1090,7 @@ impl Open115Client {
                 dup.file_id,
                 dup.size
             );
-            // delete_file will also update the cache to remove the old entry
+            // delete_file will also update the DB to remove the old entry
             if let Err(e) = self.delete_file(parent_id, &dup.file_id).await {
                 tracing::warn!(
                     "Failed to delete duplicate file {} (id={}): {}",
@@ -1039,18 +1101,19 @@ impl Open115Client {
             }
         }
 
-        // update cache with the new file info
-        {
-            let mut cache = self.files_cache.write();
-            let files = cache.entry(parent_id.to_string()).or_default();
-            if let Some(idx) = files.iter().position(|f| f.filename == info.filename) {
-                // This might be the same file_id if it was a fast-upload and we didn't delete it.
-                // Or it might be a new one if we just deleted others.
-                files[idx] = info;
-            } else {
-                files.push(info);
-            }
-        }
+        // update DB with the new file info surgically (do not use save_files_to_db as it wipes the parent directory cache)
+        let am = entities::cached_files::ActiveModel {
+            file_id: Set(info.file_id.clone()),
+            parent_id: Set(parent_id.to_string()),
+            filename: Set(info.filename.clone()),
+            is_dir: Set(info.is_dir),
+            size: Set(info.size),
+            pick_code: Set(info.pick_code.clone()),
+        };
+        entities::cached_files::Entity::insert(am)
+            .exec(&self.db)
+            .await
+            .map_err(|e| AppError::Internal(format!("DB insert fail: {e}")))?;
 
         Ok(())
     }

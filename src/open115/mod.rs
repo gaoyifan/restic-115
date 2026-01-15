@@ -2,6 +2,7 @@
 
 mod auth;
 mod client;
+pub mod database;
 mod types;
 
 pub use client::{FileInfo, Open115Client};

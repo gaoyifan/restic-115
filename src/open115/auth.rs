@@ -3,14 +3,14 @@
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::RwLock;
 use reqwest::Client;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::database::entities::tokens;
 use super::types::RefreshTokenResponse;
 use crate::error::{AppError, Result};
+use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 
 const REFRESH_URL: &str = "https://passportapi.115.com/open/refreshToken";
-const DEFAULT_TOKEN_STORE_PATH: &str = ".env";
 
 const MAX_RATE_LIMIT_RETRIES: usize = 6;
 
@@ -25,106 +25,6 @@ async fn backoff_sleep(attempt: usize) {
     // Keep the cap small so refresh can't stall the process for minutes.
     let secs = (1u64 << (attempt - 1)).min(16);
     tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
-}
-
-fn parse_boolish(v: &str) -> Option<bool> {
-    match v.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "t" | "yes" | "y" | "on" => Some(true),
-        "0" | "false" | "f" | "no" | "n" | "off" => Some(false),
-        _ => None,
-    }
-}
-
-fn should_persist_tokens() -> bool {
-    std::env::var("OPEN115_PERSIST_TOKENS")
-        .ok()
-        .and_then(|v| parse_boolish(&v))
-        .unwrap_or(false)
-}
-
-fn token_store_path() -> PathBuf {
-    std::env::var("OPEN115_TOKEN_STORE_PATH")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_TOKEN_STORE_PATH))
-}
-
-fn upsert_env_var_line(line: &str, key: &str, value: &str) -> Option<String> {
-    // Preserve comments and unrelated lines; replace only a plain `KEY=...` line.
-    let trimmed = line.trim_start();
-    if trimmed.starts_with('#') {
-        return None;
-    }
-    if let Some(rest) = trimmed.strip_prefix(key) {
-        let rest = rest.trim_start();
-        if rest.starts_with('=') {
-            return Some(format!("{key}={value}"));
-        }
-    }
-    None
-}
-
-fn persist_tokens_to_file(
-    path: &Path,
-    access_token: &str,
-    refresh_token: &str,
-) -> std::io::Result<()> {
-    use std::fs;
-    use std::io::Write;
-
-    let content = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e),
-    };
-
-    // Normalize line endings to '\n' for editing; preserve trailing newline.
-    let had_trailing_newline = content.ends_with('\n');
-    let mut lines: Vec<String> = content.split('\n').map(|s| s.to_string()).collect();
-
-    // When file ends with '\n', split() gives last empty entry; keep it for stable rewrite.
-    let mut seen_access = false;
-    let mut seen_refresh = false;
-
-    for l in &mut lines {
-        if let Some(new) = upsert_env_var_line(l, "OPEN115_ACCESS_TOKEN", access_token) {
-            *l = new;
-            seen_access = true;
-            continue;
-        }
-        if let Some(new) = upsert_env_var_line(l, "OPEN115_REFRESH_TOKEN", refresh_token) {
-            *l = new;
-            seen_refresh = true;
-            continue;
-        }
-    }
-
-    // Append missing keys (avoid duplicating if file was empty).
-    if !seen_access {
-        lines.push(format!("OPEN115_ACCESS_TOKEN={access_token}"));
-    }
-    if !seen_refresh {
-        lines.push(format!("OPEN115_REFRESH_TOKEN={refresh_token}"));
-    }
-
-    // Rebuild content
-    let mut new_content = lines.join("\n");
-    if had_trailing_newline && !new_content.ends_with('\n') {
-        new_content.push('\n');
-    } else if !had_trailing_newline && new_content.ends_with('\n') {
-        // fine
-    }
-
-    // Atomic-ish write: write temp then rename.
-    let tmp_path = path.with_extension("tmp.restic-115");
-    {
-        let mut f = fs::File::create(&tmp_path)?;
-        f.write_all(new_content.as_bytes())?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp_path, path)?;
-    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -147,29 +47,61 @@ impl TokenInfo {
 #[derive(Clone)]
 pub struct TokenManager {
     http_client: Client,
+    db: DatabaseConnection,
     token: Arc<RwLock<Option<TokenInfo>>>,
 }
 
 impl TokenManager {
-    pub fn new(access_token: Option<String>, refresh_token: Option<String>) -> Self {
+    pub async fn new(
+        db: DatabaseConnection,
+        access_token: Option<String>,
+        refresh_token: Option<String>,
+    ) -> Result<Self> {
         let http_client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("Failed to create HTTP client");
 
-        let token = match (access_token, refresh_token) {
-            (Some(a), Some(r)) => Some(TokenInfo {
+        let this = Self {
+            http_client,
+            db,
+            token: Arc::new(RwLock::new(None)),
+        };
+
+        // Try load from DB
+        let db_token = tokens::Entity::find_by_id(1)
+            .one(&this.db)
+            .await
+            .map_err(|e| AppError::Internal(format!("DB error loading tokens: {e}")))?;
+
+        let (a, r) = if let Some(t) = db_token {
+            (t.access_token, t.refresh_token)
+        } else if let (Some(a), Some(r)) = (access_token, refresh_token) {
+            // No DB token, but have env tokens; store them
+            let am = tokens::ActiveModel {
+                id: Set(1),
+                access_token: Set(a.clone()),
+                refresh_token: Set(r.clone()),
+                updated_at: Set(Utc::now()),
+            };
+            am.insert(&this.db)
+                .await
+                .map_err(|e| AppError::Internal(format!("DB error saving tokens: {e}")))?;
+            (a, r)
+        } else {
+            return Ok(this);
+        };
+
+        {
+            let mut guard = this.token.write();
+            *guard = Some(TokenInfo {
                 access_token: a,
                 refresh_token: r,
                 expires_at: None,
-            }),
-            _ => None,
-        };
-
-        Self {
-            http_client,
-            token: Arc::new(RwLock::new(token)),
+            });
         }
+
+        Ok(this)
     }
 
     pub fn http_client(&self) -> &Client {
@@ -319,21 +251,26 @@ impl TokenManager {
             });
         }
 
-        // Persist refreshed tokens for future runs (opt-in).
-        if should_persist_tokens() {
-            let path = token_store_path();
-            match persist_tokens_to_file(&path, &access_token, &refresh_token) {
-                Ok(()) => {
-                    tracing::info!(
-                        "Persisted refreshed tokens to {:?} (OPEN115_PERSIST_TOKENS enabled)",
-                        path
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to persist refreshed tokens to {:?}: {}", path, e);
-                }
-            }
-        }
+        // Persist refreshed tokens to DB
+        let am = tokens::ActiveModel {
+            id: Set(1),
+            access_token: Set(access_token.clone()),
+            refresh_token: Set(refresh_token.clone()),
+            updated_at: Set(Utc::now()),
+        };
+        tokens::Entity::insert(am)
+            .on_conflict(
+                sea_orm::sea_query::OnConflict::column(tokens::Column::Id)
+                    .update_columns([
+                        tokens::Column::AccessToken,
+                        tokens::Column::RefreshToken,
+                        tokens::Column::UpdatedAt,
+                    ])
+                    .to_owned(),
+            )
+            .exec(&self.db)
+            .await
+            .map_err(|e| AppError::Internal(format!("DB error updating tokens: {e}")))?;
 
         Ok(access_token)
     }
@@ -349,71 +286,6 @@ impl std::fmt::Debug for TokenManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    #[test]
-    fn test_upsert_env_var_line() {
-        // Normal case
-        assert_eq!(
-            upsert_env_var_line("OPEN115_ACCESS_TOKEN=old", "OPEN115_ACCESS_TOKEN", "new"),
-            Some("OPEN115_ACCESS_TOKEN=new".to_string())
-        );
-        // With spaces (the fix)
-        assert_eq!(
-            upsert_env_var_line("OPEN115_ACCESS_TOKEN = old", "OPEN115_ACCESS_TOKEN", "new"),
-            Some("OPEN115_ACCESS_TOKEN=new".to_string())
-        );
-        assert_eq!(
-            upsert_env_var_line(
-                "  OPEN115_ACCESS_TOKEN  =  old  ",
-                "OPEN115_ACCESS_TOKEN",
-                "new"
-            ),
-            Some("OPEN115_ACCESS_TOKEN=new".to_string())
-        );
-        // Comments should be ignored
-        assert_eq!(
-            upsert_env_var_line("# OPEN115_ACCESS_TOKEN=old", "OPEN115_ACCESS_TOKEN", "new"),
-            None
-        );
-        // Unrelated lines should be ignored
-        assert_eq!(
-            upsert_env_var_line("SOME_OTHER_VAR=val", "OPEN115_ACCESS_TOKEN", "new"),
-            None
-        );
-    }
-
-    #[test]
-    fn test_persist_tokens_to_file() -> std::io::Result<()> {
-        let mut tmp = NamedTempFile::new()?;
-        let path = tmp.path().to_path_buf();
-
-        // 1. Initial creation
-        persist_tokens_to_file(&path, "acc1", "ref1")?;
-        let content = std::fs::read_to_string(&path)?;
-        assert!(content.contains("OPEN115_ACCESS_TOKEN=acc1"));
-        assert!(content.contains("OPEN115_REFRESH_TOKEN=ref1"));
-
-        // 2. Update existing (one with spaces)
-        {
-            let mut f = std::fs::File::create(&path)?;
-            writeln!(f, "OPEN115_ACCESS_TOKEN = acc1")?;
-            writeln!(f, "OPEN115_REFRESH_TOKEN=ref1")?;
-            writeln!(f, "# comment")?;
-        }
-        persist_tokens_to_file(&path, "acc2", "ref2")?;
-        let content = std::fs::read_to_string(&path)?;
-        assert!(content.contains("OPEN115_ACCESS_TOKEN=acc2"));
-        assert!(content.contains("OPEN115_REFRESH_TOKEN=ref2"));
-        assert!(!content.contains("acc1"));
-        assert!(!content.contains("ref1"));
-        assert!(content.contains("# comment"));
-        // Ensure no duplicates
-        assert_eq!(content.matches("OPEN115_ACCESS_TOKEN=").count(), 1);
-        assert_eq!(content.matches("OPEN115_REFRESH_TOKEN=").count(), 1);
-
-        Ok(())
-    }
+    // Tests for persist_tokens_to_file were removed as the function is removed.
+    // Database logic is better tested in integration tests.
 }
