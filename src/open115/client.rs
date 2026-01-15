@@ -69,9 +69,8 @@ pub struct Open115Client {
 
 impl Open115Client {
     pub async fn new(cfg: Config) -> Result<Self> {
-        // Use a default DB name or from config if we added it (using default for now)
-        let db_url = "sqlite:restic-115-cache.db?mode=rwc";
-        let db = init_db(db_url)
+        let db_url = format!("sqlite:{}?mode=rwc", cfg.db_path);
+        let db = init_db(&db_url)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to init DB: {e}")))?;
 

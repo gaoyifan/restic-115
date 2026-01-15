@@ -50,4 +50,8 @@ pub struct Config {
     /// Force cache rebuild on startup
     #[arg(long, env = "OPEN115_FORCE_CACHE_REBUILD", default_value_t = false)]
     pub force_cache_rebuild: bool,
+
+    /// Path to the SQLite database file
+    #[arg(long, env = "DB_PATH", default_value = "restic-115.db")]
+    pub db_path: String,
 }

@@ -1,0 +1,21 @@
+services:
+  restic-115:
+    build:
+      context: .
+    image: ghcr.io/gaoyifan/restic-115:latest
+    container_name: restic-115
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - OPEN115_ACCESS_TOKEN=${OPEN115_ACCESS_TOKEN}
+      - OPEN115_REFRESH_TOKEN=${OPEN115_REFRESH_TOKEN}
+      - OPEN115_REPO_PATH=${OPEN115_REPO_PATH:-/restic-backup}
+      - LISTEN_ADDR=${LISTEN_ADDR:-0.0.0.0:8000}
+      - RUST_LOG=${RUST_LOG:-info}
+      - OPEN115_API_BASE=${OPEN115_API_BASE:-https://proapi.115.com}
+      - OPEN115_USER_AGENT=${OPEN115_USER_AGENT:-restic-115}
+      - OPEN115_CALLBACK_SERVER=${OPEN115_CALLBACK_SERVER:-https://api.oplist.org/115cloud/callback}
+      - OPEN115_FORCE_CACHE_REBUILD=${OPEN115_FORCE_CACHE_REBUILD:-false}
+      - DB_PATH=/app/config/restic-115.db
+    volumes:
+      - ./data:/app/config
