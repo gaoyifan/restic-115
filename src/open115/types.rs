@@ -158,7 +158,4 @@ pub struct OssCallbackData {
     pub file_size: i64,
     #[serde(rename = "file_id", default)]
     pub file_id: String,
-
-    #[serde(default)]
-    pub cid: String,
 }

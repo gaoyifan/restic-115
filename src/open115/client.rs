@@ -997,6 +997,55 @@ impl Open115Client {
         Ok(None)
     }
 
+    async fn handle_upload_success(&self, parent_id: &str, info: FileInfo) -> Result<()> {
+        let to_delete = {
+            let cache = self.files_cache.read();
+            if let Some(files) = cache.get(&parent_id.to_string()) {
+                files
+                    .iter()
+                    .filter(|f| f.filename == info.filename && f.file_id != info.file_id)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            }
+        };
+
+        for dup in to_delete {
+            tracing::info!(
+                "Deleting duplicate same-name file on 115: {} (id={}, old_id={}, size={})",
+                info.filename,
+                info.file_id,
+                dup.file_id,
+                dup.size
+            );
+            // delete_file will also update the cache to remove the old entry
+            if let Err(e) = self.delete_file(parent_id, &dup.file_id).await {
+                tracing::warn!(
+                    "Failed to delete duplicate file {} (id={}): {}",
+                    dup.filename,
+                    dup.file_id,
+                    e
+                );
+            }
+        }
+
+        // update cache with the new file info
+        {
+            let mut cache = self.files_cache.write();
+            let files = cache.entry(parent_id.to_string()).or_default();
+            if let Some(idx) = files.iter().position(|f| f.filename == info.filename) {
+                // This might be the same file_id if it was a fast-upload and we didn't delete it.
+                // Or it might be a new one if we just deleted others.
+                files[idx] = info;
+            } else {
+                files.push(info);
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn upload_file(&self, parent_id: &str, filename: &str, data: Bytes) -> Result<()> {
         let file_size = data.len();
         let file_sha1 = Self::sha1_hex_upper(&data);
@@ -1044,19 +1093,7 @@ impl Open115Client {
                     size: file_size as i64,
                     pick_code,
                 };
-
-                let mut cache = self.files_cache.write();
-                if let Some(files) = cache.get_mut(parent_id) {
-                    if let Some(idx) = files.iter().position(|f| f.filename == filename) {
-                        files[idx] = info;
-                    } else {
-                        files.push(info);
-                    }
-                } else {
-                    // Parent not in cache? This shouldn't happen if initialized.
-                    // But if it does, we insert.
-                    cache.insert(parent_id.to_string(), vec![info]);
-                }
+                self.handle_upload_success(parent_id, info).await?;
             } else {
                 tracing::warn!(
                     "Fast upload passed but no file_id in response. file={}",
@@ -1123,16 +1160,7 @@ impl Open115Client {
                     size: file_size as i64,
                     pick_code,
                 };
-                let mut cache = self.files_cache.write();
-                if let Some(files) = cache.get_mut(parent_id) {
-                    if let Some(idx) = files.iter().position(|f| f.filename == filename) {
-                        files[idx] = info;
-                    } else {
-                        files.push(info);
-                    }
-                } else {
-                    cache.insert(parent_id.to_string(), vec![info]);
-                }
+                self.handle_upload_success(parent_id, info).await?;
             }
             return Ok(());
         }
@@ -1190,34 +1218,19 @@ impl Open115Client {
 
         // If OSS callback returned file metadata, update files_cache directly.
         if let Some(cb) = cb_opt {
-            let cid = if cb.cid.is_empty() {
-                parent_id.to_string()
-            } else {
-                cb.cid.clone()
-            };
-            let filename = if cb.file_name.is_empty() {
-                filename.to_string()
-            } else {
-                cb.file_name.clone()
-            };
             let info = FileInfo {
                 file_id: cb.file_id.clone(),
-                filename,
+                filename: if cb.file_name.is_empty() {
+                    filename.to_string()
+                } else {
+                    cb.file_name.clone()
+                },
                 is_dir: false,
                 size: cb.file_size,
                 pick_code: cb.pick_code.clone(),
             };
 
-            let mut cache = self.files_cache.write();
-            if let Some(files) = cache.get_mut(&cid) {
-                if let Some(idx) = files.iter().position(|f| f.filename == info.filename) {
-                    files[idx] = info;
-                } else {
-                    files.push(info);
-                }
-            } else {
-                cache.insert(cid, vec![info]);
-            }
+            self.handle_upload_success(parent_id, info).await?;
         }
         Ok(())
     }
