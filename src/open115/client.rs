@@ -7,7 +7,7 @@ use chrono::Utc;
 use hmac::{Hmac, Mac};
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::multipart::Form;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, Set};
 use serde_json::Value;
 use sha1::Digest;
 use std::time::Duration;
@@ -166,6 +166,14 @@ impl Open115Client {
 
         tracing::info!("Cache warm-up completed in {:?}", start.elapsed());
         Ok(())
+    }
+
+    pub async fn has_cache_data(&self) -> Result<bool> {
+        let count = entities::cached_files::Entity::find()
+            .count(&self.db)
+            .await
+            .map_err(|e| AppError::Internal(format!("DB count fail: {e}")))?;
+        Ok(count > 0)
     }
 
     async fn fetch_files_from_api(&self, cid: &str) -> Result<Vec<FileInfo>> {

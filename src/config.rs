@@ -47,7 +47,7 @@ pub struct Config {
     )]
     pub callback_server: String,
 
-    /// Skip cache initialization on startup
-    #[arg(long, env = "OPEN115_FORCE_CACHE_REBUILD", default_value = "false")]
+    /// Force cache rebuild on startup
+    #[arg(long, env = "OPEN115_FORCE_CACHE_REBUILD", default_value_t = false)]
     pub force_cache_rebuild: bool,
 }
