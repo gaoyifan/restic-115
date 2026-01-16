@@ -47,7 +47,7 @@ async fn test_persistence() {
             .expect("Failed to create client");
         // warm_cache will fetch and save to DB
         client
-            .ensure_path(&repo_path)
+            .ensure_path(&repo_path, false)
             .await
             .expect("Failed to ensure path");
         client.warm_cache().await.expect("Failed to warm cache");
@@ -96,7 +96,7 @@ async fn test_upload_does_not_wipe_siblings() {
     let client = Open115Client::new(config.clone()).await.unwrap();
 
     // 1. Create a directory and add two files to it
-    let dir_id = client.ensure_path(&repo_path).await.unwrap();
+    let dir_id = client.ensure_path(&repo_path, false).await.unwrap();
 
     // Upload file1
     client

@@ -83,7 +83,7 @@ async fn test_create_list_delete_directory() {
     let repo_path = unique_repo_path("restic-115-integration-dir");
     let client = make_test_client(&repo_path).await.unwrap();
 
-    let dir_id = match client.ensure_path(&repo_path).await {
+    let dir_id = match client.ensure_path(&repo_path, false).await {
         Ok(id) => id,
         Err(e) => {
             eprintln!("Failed to create directory (maybe rate limited): {:?}", e);
@@ -105,7 +105,7 @@ async fn test_upload_and_download_small_file() {
     let repo_path = unique_repo_path("restic-115-integration-upload");
     let client = make_test_client(&repo_path).await.unwrap();
 
-    let dir_id = match client.ensure_path(&repo_path).await {
+    let dir_id = match client.ensure_path(&repo_path, false).await {
         Ok(id) => id,
         Err(e) => {
             eprintln!("Failed to create directory (maybe rate limited): {:?}", e);
