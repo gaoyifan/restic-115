@@ -73,6 +73,17 @@ pub async fn init_db(db_url: &str) -> Result<DatabaseConnection, DbErr> {
     opt.sqlx_logging_level(LevelFilter::Debug);
     let db = Database::connect(opt).await?;
 
+    // Enable SQLite performance optimizations
+    db.execute(sea_orm::Statement::from_string(
+        sea_orm::DatabaseBackend::Sqlite,
+        "PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=NORMAL;
+         PRAGMA cache_size=-64000; -- ~64MB
+         PRAGMA temp_store=MEMORY;
+         PRAGMA mmap_size=1000000000;",
+    ))
+    .await?;
+
     // Create tables if they don't exist
     let builder = db.get_database_backend();
     let schema = Schema::new(builder);
