@@ -44,7 +44,7 @@ All options are available as CLI flags and environment variables.
 - `OPEN115_USER_AGENT` (`--user-agent`): User agent for 115 API calls. Default: `restic-115`.
 - `OPEN115_CALLBACK_SERVER` (`--callback-server`): Callback server hint (documentation only).
 - `OPEN115_FORCE_CACHE_REBUILD` (`--force-cache-rebuild`): Force cache warm-up on startup.
-- `DB_PATH` (`--db-path`): SQLite DB path. Default: `restic-115.db`.
+- `DB_PATH` (`--db-path`): SQLite DB path. Default: `cache-115.db`.
 
 ## Cache behavior
 
@@ -62,7 +62,7 @@ export OPEN115_REPO_PATH=/restic-backup
 docker compose up --build
 ```
 
-The container stores the cache DB at `./data/restic-115.db` via the volume in `docker-compose.yml`.
+The container stores the cache DB at `./cache/cache-115.db` via the volume in `docker-compose.yml`.
 
 ## API behavior notes
 
