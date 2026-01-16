@@ -1,4 +1,5 @@
-use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbErr, Schema};
+use log::LevelFilter;
+use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbErr, Schema};
 
 pub mod entities {
     pub mod tokens {
@@ -68,7 +69,9 @@ pub mod entities {
 // =========================================================================
 
 pub async fn init_db(db_url: &str) -> Result<DatabaseConnection, DbErr> {
-    let db = Database::connect(db_url).await?;
+    let mut opt = ConnectOptions::new(db_url);
+    opt.sqlx_logging_level(LevelFilter::Debug);
+    let db = Database::connect(opt).await?;
 
     // Create tables if they don't exist
     let builder = db.get_database_backend();

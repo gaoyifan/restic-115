@@ -2052,6 +2052,7 @@ dependencies = [
  "clap",
  "hex",
  "hmac",
+ "log",
  "parking_lot",
  "predicates",
  "rand",
