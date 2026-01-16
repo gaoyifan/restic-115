@@ -2,4 +2,6 @@
 .env
 reference
 *.db
-/data
+*.db-shm
+*.db-wal
+/cache

@@ -16,6 +16,6 @@ services:
       - OPEN115_USER_AGENT=${OPEN115_USER_AGENT:-restic-115}
       - OPEN115_CALLBACK_SERVER=${OPEN115_CALLBACK_SERVER:-https://api.oplist.org/115cloud/callback}
       - OPEN115_FORCE_CACHE_REBUILD=${OPEN115_FORCE_CACHE_REBUILD:-false}
-      - DB_PATH=/app/config/restic-115.db
+      - DB_PATH=/app/cache/cache-115.db
     volumes:
-      - ./data:/app/config
+      - ./cache:/app/cache

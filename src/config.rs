@@ -52,6 +52,6 @@ pub struct Config {
     pub force_cache_rebuild: bool,
 
     /// Path to the SQLite database file
-    #[arg(long, env = "DB_PATH", default_value = "restic-115.db")]
+    #[arg(long, env = "DB_PATH", default_value = "cache-115.db")]
     pub db_path: String,
 }
