@@ -33,8 +33,8 @@ sha1 = "0.10"
 base64 = "0.22"
 hex = "0.4"
 # Database
-sea-orm = { version = "1", features = ["sqlx-sqlite", "macros"] }
-sqlx = { version = "0.8", features = ["sqlite"]}
+sea-orm = { version = "1", features = ["sqlx-sqlite", "runtime-tokio-native-tls", "macros"] }
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-native-tls"] }
 log = "0.4.29"
 
 [dev-dependencies]
