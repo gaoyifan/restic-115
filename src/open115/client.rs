@@ -339,43 +339,81 @@ impl Open115Client {
         url: &str,
         query: &[(&str, String)],
     ) -> Result<T> {
+        self.request_with_retry("GET", url, |token| {
+            let client = self.token_manager.http_client();
+            let url = url.to_string();
+            let query = query.to_vec();
+            let headers = self.auth_headers(&token);
+            async move {
+                let resp = client
+                    .get(&url)
+                    .headers(headers)
+                    .query(&query)
+                    .send()
+                    .await?;
+                let status = resp.status();
+                let bytes = resp.bytes().await?;
+                Ok((status, bytes))
+            }
+        })
+        .await
+    }
+
+    /// Perform an authenticated POST (form) with auto-refresh-on-401.
+    async fn post_form_json<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        form_builder: impl Fn() -> Form,
+    ) -> Result<T> {
+        self.request_with_retry("POST", url, |token| {
+            let client = self.token_manager.http_client();
+            let url = url.to_string();
+            let form = form_builder();
+            let headers = self.auth_headers(&token);
+            async move {
+                let resp = client
+                    .post(&url)
+                    .headers(headers)
+                    .multipart(form)
+                    .send()
+                    .await?;
+                let status = resp.status();
+                let bytes = resp.bytes().await?;
+                Ok((status, bytes))
+            }
+        })
+        .await
+    }
+
+    async fn request_with_retry<T, F, Fut>(
+        &self,
+        method: &str,
+        url: &str,
+        make_request: F,
+    ) -> Result<T>
+    where
+        T: serde::de::DeserializeOwned,
+        F: Fn(String) -> Fut,
+        Fut: std::future::Future<Output = Result<(reqwest::StatusCode, Bytes)>>,
+    {
         self.require_tokens()?;
 
-        async fn send(
-            this: &Open115Client,
-            token: &str,
-            url: &str,
-            query: &[(&str, String)],
-        ) -> Result<(reqwest::StatusCode, Bytes)> {
-            let resp = this
-                .token_manager
-                .http_client()
-                .get(url)
-                .headers(this.auth_headers(token))
-                .query(query)
-                .send()
-                .await?;
-            let status = resp.status();
-            let bytes = resp.bytes().await?;
-            Ok((status, bytes))
-        }
-
-        // Retry loop for 115 quota / rate limits.
         for attempt in 1..=MAX_RATE_LIMIT_RETRIES {
             let token = self.token_manager.get_token().await?;
-            let (status, bytes) = send(self, &token, url, query).await?;
+            let (status, bytes) = make_request(token).await?;
 
             // HTTP-level 401: refresh and retry.
             if status.as_u16() == 401 {
                 let token = self.token_manager.refresh_token().await?;
-                let (_status2, bytes2) = send(self, &token, url, query).await?;
+                let (_status2, bytes2) = make_request(token).await?;
                 return Ok(serde_json::from_slice::<T>(&bytes2)?);
             }
 
             // HTTP-level 429: backoff and retry.
             if status.as_u16() == 429 && attempt < MAX_RATE_LIMIT_RETRIES {
                 tracing::warn!(
-                    "HTTP 429 on GET {}, backing off attempt {}/{}",
+                    "HTTP 429 on {} {}, backing off attempt {}/{}",
+                    method,
                     url,
                     attempt,
                     MAX_RATE_LIMIT_RETRIES
@@ -391,13 +429,14 @@ impl Open115Client {
                     if let Some(code) = v.get("code").and_then(|c| c.as_i64()) {
                         if is_access_token_invalid(code) {
                             let token = self.token_manager.refresh_token().await?;
-                            let (_status2, bytes2) = send(self, &token, url, query).await?;
+                            let (_status2, bytes2) = make_request(token).await?;
                             return Ok(serde_json::from_slice::<T>(&bytes2)?);
                         }
                         if is_rate_limited(code) && attempt < MAX_RATE_LIMIT_RETRIES {
                             tracing::warn!(
-                                "115 rate limited (code={}) on GET {}, backing off attempt {}/{}",
+                                "115 rate limited (code={}) on {} {}, backing off attempt {}/{}",
                                 code,
+                                method,
                                 url,
                                 attempt,
                                 MAX_RATE_LIMIT_RETRIES
@@ -407,88 +446,7 @@ impl Open115Client {
                         }
                     }
                     // For other errors, log the full response
-                    tracing::warn!("115 API Error on GET {}: {}", url, v);
-                }
-                return Ok(serde_json::from_value::<T>(v)?);
-            }
-
-            return Ok(serde_json::from_slice::<T>(&bytes)?);
-        }
-
-        unreachable!("loop either returns or continues")
-    }
-
-    /// Perform an authenticated POST (form) with auto-refresh-on-401.
-    async fn post_form_json<T: serde::de::DeserializeOwned>(
-        &self,
-        url: &str,
-        form_builder: impl Fn() -> Form,
-    ) -> Result<T> {
-        self.require_tokens()?;
-
-        async fn send(
-            this: &Open115Client,
-            token: &str,
-            url: &str,
-            form_builder: &impl Fn() -> Form,
-        ) -> Result<(reqwest::StatusCode, Bytes)> {
-            let resp = this
-                .token_manager
-                .http_client()
-                .post(url)
-                .headers(this.auth_headers(token))
-                .multipart(form_builder())
-                .send()
-                .await?;
-            let status = resp.status();
-            let bytes = resp.bytes().await?;
-            Ok((status, bytes))
-        }
-
-        for attempt in 1..=MAX_RATE_LIMIT_RETRIES {
-            let token = self.token_manager.get_token().await?;
-            let (status, bytes) = send(self, &token, url, &form_builder).await?;
-
-            if status.as_u16() == 401 {
-                let token = self.token_manager.refresh_token().await?;
-                let (_status2, bytes2) = send(self, &token, url, &form_builder).await?;
-                return Ok(serde_json::from_slice::<T>(&bytes2)?);
-            }
-
-            // HTTP-level 429: backoff and retry.
-            if status.as_u16() == 429 && attempt < MAX_RATE_LIMIT_RETRIES {
-                tracing::warn!(
-                    "HTTP 429 on POST {}, backing off attempt {}/{}",
-                    url,
-                    attempt,
-                    MAX_RATE_LIMIT_RETRIES
-                );
-                backoff_sleep(attempt).await;
-                continue;
-            }
-
-            if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
-                if is_api_error(&v) {
-                    if let Some(code) = v.get("code").and_then(|c| c.as_i64()) {
-                        if is_access_token_invalid(code) {
-                            let token = self.token_manager.refresh_token().await?;
-                            let (_status2, bytes2) = send(self, &token, url, &form_builder).await?;
-                            return Ok(serde_json::from_slice::<T>(&bytes2)?);
-                        }
-                        if is_rate_limited(code) && attempt < MAX_RATE_LIMIT_RETRIES {
-                            tracing::warn!(
-                                "115 rate limited (code={}) on POST {}, backing off attempt {}/{}",
-                                code,
-                                url,
-                                attempt,
-                                MAX_RATE_LIMIT_RETRIES
-                            );
-                            backoff_sleep(attempt).await;
-                            continue;
-                        }
-                    }
-                    // For other errors, log the full response
-                    tracing::warn!("115 API Error on POST {}: {}", url, v);
+                    tracing::warn!("115 API Error on {} {}: {}", method, url, v);
                 }
                 return Ok(serde_json::from_value::<T>(v)?);
             }
@@ -1441,5 +1399,81 @@ mod tests {
         // Mixed
         assert!(is_api_error(&json!({"state": true, "code": 99})));
         assert!(is_api_error(&json!({"state": false, "code": 0}))); // if state says false, it's an error even if code is 0 (though unlikely from API)
+    }
+
+    #[tokio::test]
+    async fn test_request_with_retry_logic() {
+        // Setup a dummy client with in-memory DB
+        let cfg = Config {
+            access_token: Some("fake_access".to_string()),
+            refresh_token: Some("fake_refresh".to_string()),
+            db_path: ":memory:".to_string(),
+            repo_path: "/test".to_string(),
+            listen_addr: "127.0.0.1:0".to_string(),
+            log_level: "info".to_string(),
+            api_base: "https://mock.api".to_string(),
+            user_agent: "test".to_string(),
+            callback_server: "https://cb".to_string(),
+            force_cache_rebuild: false,
+        };
+
+        let client = Open115Client::new(cfg)
+            .await
+            .expect("Failed to create test client");
+
+        // Case 1: Success on first try
+        let result: Result<serde_json::Value> = client
+            .request_with_retry("GET", "http://test", |_token| async {
+                Ok((
+                    reqwest::StatusCode::OK,
+                    Bytes::from(r#"{"state": true, "data": "ok"}"#),
+                ))
+            })
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap()["data"], "ok");
+
+        // Case 2: API Error (non-retriable)
+        let result: Result<serde_json::Value> = client
+            .request_with_retry("GET", "http://test", |_token| {
+                async {
+                    // API returns error
+                    Ok((
+                        reqwest::StatusCode::OK,
+                        Bytes::from(r#"{"state": false, "code": 999, "message": "fail"}"#),
+                    ))
+                }
+            })
+            .await;
+        // Should return Ok(Value) and log warning
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val["code"], 999);
+
+        // Case 3: 429 Retry
+        // We need shared state to simulate attempts
+        use std::sync::{Arc, Mutex};
+        let attempts = Arc::new(Mutex::new(0));
+        let attempts_clone = attempts.clone();
+
+        // tokio::time::pause(); // Requires test-util feature, which is missing. Accepting 1s delay.
+
+        let result: Result<serde_json::Value> = client
+            .request_with_retry("GET", "http://test_429", move |_token| {
+                let attempts = attempts_clone.clone();
+                async move {
+                    let mut guard = attempts.lock().unwrap();
+                    *guard += 1;
+                    if *guard < 2 {
+                        Ok((reqwest::StatusCode::TOO_MANY_REQUESTS, Bytes::new()))
+                    } else {
+                        Ok((reqwest::StatusCode::OK, Bytes::from(r#"{"state": true}"#)))
+                    }
+                }
+            })
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(*attempts.lock().unwrap(), 2);
     }
 }
