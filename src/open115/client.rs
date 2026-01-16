@@ -95,7 +95,7 @@ impl Open115Client {
         tracing::info!("Starting cache warm-up for repository: {}", self.repo_path);
 
         // 1. Ensure repo root exists and get its ID
-        let repo_id = self.ensure_path(&self.repo_path).await?;
+        let repo_id = self.ensure_path(&self.repo_path, true).await?;
         tracing::info!("Repository root found: {} (id={})", self.repo_path, repo_id);
 
         // 2. Fetch and cache root files
@@ -611,7 +611,7 @@ impl Open115Client {
         Ok(Some(current_id))
     }
 
-    pub async fn ensure_path(&self, path: &str) -> Result<String> {
+    pub async fn ensure_path(&self, path: &str, check_remote_before_create: bool) -> Result<String> {
         let parts: Vec<&str> = path
             .trim_start_matches('/')
             .trim_end_matches('/')
@@ -631,6 +631,20 @@ impl Open115Client {
                 continue;
             }
 
+            if check_remote_before_create {
+                let files = self.fetch_files_from_api(&current_id).await?;
+                self.save_files_to_db(&current_id, &files).await?;
+                if let Some(info) = files
+                    .iter()
+                    .filter(|f| f.filename == part && f.is_dir)
+                    .max_by_key(|f| &f.file_id)
+                {
+                    current_id = info.file_id.clone();
+                    self.save_dir_to_db(&current_path, &current_id).await?;
+                    continue;
+                }
+            }
+
             // Create first; for brand-new repos this avoids an extra search/list call per component.
             // If it already exists, create_directory() will resolve the existing id via a cheap search.
             let new_id = self.create_directory(&current_id, part).await?;
@@ -648,7 +662,7 @@ impl Open115Client {
     pub async fn get_data_file_dir_id(&self, filename: &str) -> Result<String> {
         let prefix = Self::data_subdir_prefix(filename);
         let path = format!("{}/data/{}", self.repo_path, prefix);
-        self.ensure_path(&path).await
+        self.ensure_path(&path, false).await
     }
 
     pub async fn find_data_file_dir_id(&self, filename: &str) -> Result<Option<String>> {
@@ -659,9 +673,9 @@ impl Open115Client {
 
     pub async fn get_type_dir_id(&self, file_type: ResticFileType) -> Result<String> {
         if file_type.is_config() {
-            self.ensure_path(&self.repo_path).await
+            self.ensure_path(&self.repo_path, false).await
         } else {
-            self.ensure_path(&format!("{}/{}", self.repo_path, file_type.dirname()))
+            self.ensure_path(&format!("{}/{}", self.repo_path, file_type.dirname()), false)
                 .await
         }
     }
@@ -1319,7 +1333,7 @@ impl Open115Client {
     }
 
     pub async fn init_repository(&self) -> Result<()> {
-        self.ensure_path(&self.repo_path).await?;
+        self.ensure_path(&self.repo_path, false).await?;
         for t in [
             ResticFileType::Data,
             ResticFileType::Keys,
@@ -1327,7 +1341,7 @@ impl Open115Client {
             ResticFileType::Snapshots,
             ResticFileType::Index,
         ] {
-            self.ensure_path(&format!("{}/{}", self.repo_path, t.dirname()))
+            self.ensure_path(&format!("{}/{}", self.repo_path, t.dirname()), false)
                 .await?;
         }
         Ok(())
