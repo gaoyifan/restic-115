@@ -41,6 +41,32 @@ fn is_rate_limited(code: i64) -> bool {
     is_quota_limited(code) || code == 40140117
 }
 
+fn is_api_error(v: &Value) -> bool {
+    if let Some(code) = v.get("code").and_then(|c| c.as_i64()) {
+        if code != 0 {
+            return true;
+        }
+    }
+    if let Some(state) = v.get("state") {
+        if let Some(b) = state.as_bool() {
+            if !b {
+                return true;
+            }
+        }
+        if let Some(n) = state.as_i64() {
+            if n == 0 {
+                return true;
+            }
+        }
+        if let Some(s) = state.as_str() {
+            if s == "0" || s.eq_ignore_ascii_case("false") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 async fn backoff_sleep(attempt: usize) {
     // Exponential backoff with a cap.
     // attempt starts at 1.
@@ -360,23 +386,28 @@ impl Open115Client {
 
             // App-level token invalid / quota limit are encoded in JSON.
             if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
-                if let Some(code) = v.get("code").and_then(|c| c.as_i64()) {
-                    if is_access_token_invalid(code) {
-                        let token = self.token_manager.refresh_token().await?;
-                        let (_status2, bytes2) = send(self, &token, url, query).await?;
-                        return Ok(serde_json::from_slice::<T>(&bytes2)?);
+                if is_api_error(&v) {
+                    // Check for specific actionable errors first
+                    if let Some(code) = v.get("code").and_then(|c| c.as_i64()) {
+                        if is_access_token_invalid(code) {
+                            let token = self.token_manager.refresh_token().await?;
+                            let (_status2, bytes2) = send(self, &token, url, query).await?;
+                            return Ok(serde_json::from_slice::<T>(&bytes2)?);
+                        }
+                        if is_rate_limited(code) && attempt < MAX_RATE_LIMIT_RETRIES {
+                            tracing::warn!(
+                                "115 rate limited (code={}) on GET {}, backing off attempt {}/{}",
+                                code,
+                                url,
+                                attempt,
+                                MAX_RATE_LIMIT_RETRIES
+                            );
+                            backoff_sleep(attempt).await;
+                            continue;
+                        }
                     }
-                    if is_rate_limited(code) && attempt < MAX_RATE_LIMIT_RETRIES {
-                        tracing::warn!(
-                            "115 rate limited (code={}) on GET {}, backing off attempt {}/{}",
-                            code,
-                            url,
-                            attempt,
-                            MAX_RATE_LIMIT_RETRIES
-                        );
-                        backoff_sleep(attempt).await;
-                        continue;
-                    }
+                    // For other errors, log the full response
+                    tracing::warn!("115 API Error on GET {}: {}", url, v);
                 }
                 return Ok(serde_json::from_value::<T>(v)?);
             }
@@ -437,23 +468,27 @@ impl Open115Client {
             }
 
             if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
-                if let Some(code) = v.get("code").and_then(|c| c.as_i64()) {
-                    if is_access_token_invalid(code) {
-                        let token = self.token_manager.refresh_token().await?;
-                        let (_status2, bytes2) = send(self, &token, url, &form_builder).await?;
-                        return Ok(serde_json::from_slice::<T>(&bytes2)?);
+                if is_api_error(&v) {
+                    if let Some(code) = v.get("code").and_then(|c| c.as_i64()) {
+                        if is_access_token_invalid(code) {
+                            let token = self.token_manager.refresh_token().await?;
+                            let (_status2, bytes2) = send(self, &token, url, &form_builder).await?;
+                            return Ok(serde_json::from_slice::<T>(&bytes2)?);
+                        }
+                        if is_rate_limited(code) && attempt < MAX_RATE_LIMIT_RETRIES {
+                            tracing::warn!(
+                                "115 rate limited (code={}) on POST {}, backing off attempt {}/{}",
+                                code,
+                                url,
+                                attempt,
+                                MAX_RATE_LIMIT_RETRIES
+                            );
+                            backoff_sleep(attempt).await;
+                            continue;
+                        }
                     }
-                    if is_rate_limited(code) && attempt < MAX_RATE_LIMIT_RETRIES {
-                        tracing::warn!(
-                            "115 rate limited (code={}) on POST {}, backing off attempt {}/{}",
-                            code,
-                            url,
-                            attempt,
-                            MAX_RATE_LIMIT_RETRIES
-                        );
-                        backoff_sleep(attempt).await;
-                        continue;
-                    }
+                    // For other errors, log the full response
+                    tracing::warn!("115 API Error on POST {}: {}", url, v);
                 }
                 return Ok(serde_json::from_value::<T>(v)?);
             }
@@ -611,7 +646,11 @@ impl Open115Client {
         Ok(Some(current_id))
     }
 
-    pub async fn ensure_path(&self, path: &str, check_remote_before_create: bool) -> Result<String> {
+    pub async fn ensure_path(
+        &self,
+        path: &str,
+        check_remote_before_create: bool,
+    ) -> Result<String> {
         let parts: Vec<&str> = path
             .trim_start_matches('/')
             .trim_end_matches('/')
@@ -675,8 +714,11 @@ impl Open115Client {
         if file_type.is_config() {
             self.ensure_path(&self.repo_path, false).await
         } else {
-            self.ensure_path(&format!("{}/{}", self.repo_path, file_type.dirname()), false)
-                .await
+            self.ensure_path(
+                &format!("{}/{}", self.repo_path, file_type.dirname()),
+                false,
+            )
+            .await
         }
     }
 
@@ -1368,5 +1410,36 @@ impl std::fmt::Debug for Open115Client {
             .field("api_base", &self.api_base)
             .field("repo_path", &self.repo_path)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_is_api_error() {
+        // Success cases
+        assert!(!is_api_error(&json!({"state": true})));
+        assert!(!is_api_error(&json!({"state": 1})));
+        assert!(!is_api_error(&json!({"state": "true"})));
+        assert!(!is_api_error(&json!({"state": "TRUE"})));
+        assert!(!is_api_error(&json!({"state": "1"})));
+        assert!(!is_api_error(&json!({"code": 0})));
+
+        // Error cases - state false
+        assert!(is_api_error(&json!({"state": false})));
+        assert!(is_api_error(&json!({"state": 0})));
+        assert!(is_api_error(&json!({"state": "false"})));
+        assert!(is_api_error(&json!({"state": "0"})));
+
+        // Error cases - code non-zero
+        assert!(is_api_error(&json!({"code": -1})));
+        assert!(is_api_error(&json!({"code": 401})));
+
+        // Mixed
+        assert!(is_api_error(&json!({"state": true, "code": 99})));
+        assert!(is_api_error(&json!({"state": false, "code": 0}))); // if state says false, it's an error even if code is 0 (though unlikely from API)
     }
 }
