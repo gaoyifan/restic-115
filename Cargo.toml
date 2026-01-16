@@ -2,6 +2,9 @@
 name = "restic-115"
 version = "0.1.0"
 edition = "2024"
+description = "Restic REST backend server for 115 Open Platform storage."
+license = "MIT"
+repository = "https://github.com/gaoyifan/restic-115"
 
 [dependencies]
 axum = "0.7"
