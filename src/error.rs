@@ -1,9 +1,9 @@
 //! Error types for the restic-115 application.
 
 use axum::{
+    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde_json::json;
 
@@ -64,7 +64,8 @@ impl IntoResponse for AppError {
             }
             AppError::Auth(msg) => {
                 tracing::error!("Auth error: {}", msg);
-                (StatusCode::UNAUTHORIZED, msg.clone())
+                // Return 502 so restic retries instead of exiting (which it does on 401)
+                (StatusCode::BAD_GATEWAY, msg.clone())
             }
             AppError::NotFound(msg) => {
                 tracing::debug!("Not found: {}", msg);
@@ -98,4 +99,3 @@ impl IntoResponse for AppError {
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;
-

@@ -13,6 +13,8 @@ async fn get_test_config(repo_path: &str) -> Option<Config> {
         api_base: "https://proapi.115.com".to_string(),
         user_agent: "restic-115-tests".to_string(),
         callback_server: "https://api.oplist.org/115cloud/callback".to_string(),
+        db_path: "test-persistence.db".to_string(),
+        force_cache_rebuild: false,
     })
 }
 
