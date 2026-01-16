@@ -78,9 +78,9 @@ pub async fn init_db(db_url: &str) -> Result<DatabaseConnection, DbErr> {
         sea_orm::DatabaseBackend::Sqlite,
         "PRAGMA journal_mode=WAL;
          PRAGMA synchronous=NORMAL;
-         PRAGMA cache_size=-64000; -- ~64MB
+         PRAGMA cache_size=-256000; -- ~256MB
          PRAGMA temp_store=MEMORY;
-         PRAGMA mmap_size=1000000000;",
+         PRAGMA mmap_size=30000000000;",
     ))
     .await?;
 
