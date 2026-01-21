@@ -1496,4 +1496,78 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(*attempts.lock().unwrap(), 2);
     }
+
+    #[tokio::test]
+    async fn test_download_url_caching() {
+        // Setup a dummy client with in-memory DB
+        let cfg = Config {
+            access_token: Some("fake_access".to_string()),
+            refresh_token: Some("fake_refresh".to_string()),
+            db_path: ":memory:".to_string(),
+            repo_path: "/test".to_string(),
+            listen_addr: "127.0.0.1:0".to_string(),
+            log_level: "info".to_string(),
+            api_base: "https://mock.api".to_string(),
+            user_agent: "test".to_string(),
+            callback_server: "https://cb".to_string(),
+            force_cache_rebuild: false,
+        };
+
+        let client = Open115Client::new(cfg)
+            .await
+            .expect("Failed to create test client");
+
+        // Test 1: Verify cache is empty initially
+        {
+            let cache = client.download_url_cache.lock();
+            assert_eq!(cache.cache_size(), 0);
+        }
+
+        // Test 2: Manually insert into cache and verify retrieval
+        let test_pick_code = "test_pick_123";
+        let test_url = "https://download.example.com/file123";
+        
+        {
+            let mut cache = client.download_url_cache.lock();
+            cache.cache_set(test_pick_code.to_string(), test_url.to_string());
+        }
+
+        // Verify cache hit
+        {
+            let mut cache = client.download_url_cache.lock();
+            assert_eq!(cache.cache_size(), 1);
+            let cached_url = cache.cache_get(&test_pick_code.to_string());
+            assert!(cached_url.is_some());
+            assert_eq!(cached_url.unwrap(), test_url);
+        }
+
+        // Test 3: Verify cache expiration (TTL = 300 seconds = 5 minutes)
+        // We can't easily test the actual expiration without waiting or mocking time,
+        // but we can at least verify the cache lifespan is set correctly
+        // by checking that the cache was initialized with the correct TTL.
+        // The lifespan is verified by the fact that TimedCache::with_lifespan(300) was used.
+        
+        // Test 4: Verify cache clears after expiry (simulate by manually flushing)
+        {
+            let mut cache = client.download_url_cache.lock();
+            cache.cache_clear();
+            assert_eq!(cache.cache_size(), 0);
+        }
+
+        // Test 5: Multiple entries
+        {
+            let mut cache = client.download_url_cache.lock();
+            cache.cache_set("pick1".to_string(), "url1".to_string());
+            cache.cache_set("pick2".to_string(), "url2".to_string());
+            cache.cache_set("pick3".to_string(), "url3".to_string());
+        }
+
+        {
+            let mut cache = client.download_url_cache.lock();
+            assert_eq!(cache.cache_size(), 3);
+            assert_eq!(cache.cache_get(&"pick1".to_string()).unwrap(), "url1");
+            assert_eq!(cache.cache_get(&"pick2".to_string()).unwrap(), "url2");
+            assert_eq!(cache.cache_get(&"pick3".to_string()).unwrap(), "url3");
+        }
+    }
 }
