@@ -50,6 +50,8 @@ All options are available as CLI flags and environment variables.
 
 On startup the server checks the SQLite cache. If it is empty (or `OPEN115_FORCE_CACHE_REBUILD=true`), it warms the cache by listing the repository root, the standard restic directories, and all `data/xx` subdirectories. The cache is updated on uploads and deletes to keep restic requests fast and avoid extra API listing calls.
 
+Additionally, download URLs from the 115 API are cached in-memory for 5 minutes to reduce API calls during file downloads. This improves performance when restic reads the same file multiple times or performs operations that require repeated access to the same objects.
+
 ## Docker
 
 Build and run with Docker Compose:
