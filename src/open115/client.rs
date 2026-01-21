@@ -737,7 +737,7 @@ impl Open115Client {
         // Check cache first
         {
             let mut cache = self.download_url_cache.lock();
-            if let Some(url) = cache.cache_get(&pick_code.to_string()) {
+            if let Some(url) = cache.cache_get(pick_code) {
                 return Ok(url.clone());
             }
         }
@@ -1536,7 +1536,7 @@ mod tests {
         {
             let mut cache = client.download_url_cache.lock();
             assert_eq!(cache.cache_size(), 1);
-            let cached_url = cache.cache_get(&test_pick_code.to_string());
+            let cached_url = cache.cache_get(test_pick_code);
             assert!(cached_url.is_some());
             assert_eq!(cached_url.unwrap(), test_url);
         }
@@ -1565,9 +1565,9 @@ mod tests {
         {
             let mut cache = client.download_url_cache.lock();
             assert_eq!(cache.cache_size(), 3);
-            assert_eq!(cache.cache_get(&"pick1".to_string()).unwrap(), "url1");
-            assert_eq!(cache.cache_get(&"pick2".to_string()).unwrap(), "url2");
-            assert_eq!(cache.cache_get(&"pick3".to_string()).unwrap(), "url3");
+            assert_eq!(cache.cache_get("pick1").unwrap(), "url1");
+            assert_eq!(cache.cache_get("pick2").unwrap(), "url2");
+            assert_eq!(cache.cache_get("pick3").unwrap(), "url3");
         }
     }
 }
