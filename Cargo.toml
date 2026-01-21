@@ -26,6 +26,7 @@ clap = { version = "4", features = ["derive", "env"] }
 chrono = "0.4"
 bytes = "1"
 parking_lot = "0.12"
+cached = { version = "0.54", features = ["async"] }
 
 # OSS signing + hashing
 hmac = "0.12"

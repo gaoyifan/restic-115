@@ -3,13 +3,16 @@
 use super::database::{entities, init_db};
 use base64::Engine;
 use bytes::Bytes;
+use cached::{Cached, TimedCache};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
+use parking_lot::Mutex;
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::multipart::Form;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, Set};
 use serde_json::Value;
 use sha1::Digest;
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::ResticFileType;
@@ -91,6 +94,7 @@ pub struct Open115Client {
     repo_path: String,
     user_agent: String,
     db: DatabaseConnection,
+    download_url_cache: Arc<Mutex<TimedCache<String, String>>>,
 }
 
 impl Open115Client {
@@ -113,6 +117,7 @@ impl Open115Client {
             repo_path: cfg.repo_path,
             user_agent: cfg.user_agent,
             db,
+            download_url_cache: Arc::new(Mutex::new(TimedCache::with_lifespan(300))),
         })
     }
     /// Recursively warm up the cache.
@@ -729,6 +734,15 @@ impl Open115Client {
     }
 
     pub async fn get_download_url(&self, pick_code: &str) -> Result<String> {
+        // Check cache first
+        {
+            let mut cache = self.download_url_cache.lock();
+            if let Some(url) = cache.cache_get(&pick_code.to_string()) {
+                return Ok(url.clone());
+            }
+        }
+
+        // Cache miss - fetch from API
         let url = format!("{}/open/ufile/downurl", self.api_base);
         let pick_code_s = pick_code.to_string();
         let resp: DownUrlResponse = self
@@ -753,7 +767,13 @@ impl Open115Client {
                     .and_then(|x| x.get("url"))
                     .and_then(|x| x.as_str())
                 {
-                    return Ok(u.to_string());
+                    let download_url = u.to_string();
+                    // Store in cache
+                    {
+                        let mut cache = self.download_url_cache.lock();
+                        cache.cache_set(pick_code.to_string(), download_url.clone());
+                    }
+                    return Ok(download_url);
                 }
             }
         }
