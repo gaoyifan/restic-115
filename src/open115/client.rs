@@ -144,9 +144,6 @@ impl Open115Client {
                 .max_by_key(|f| &f.file_id)
             {
                 let dir_id = &dir_info.file_id;
-                // Add to dir_cache
-                let full_path = format!("{}/{}", self.repo_path, dirname);
-                self.save_dir_to_db(&full_path, dir_id).await?;
 
                 // Fetch content
                 let files = self.fetch_files_from_api(dir_id).await?;
@@ -164,8 +161,6 @@ impl Open115Client {
             .max_by_key(|f| &f.file_id)
         {
             let data_id = &data_dir.file_id;
-            let full_path = format!("{}/data", self.repo_path);
-            self.save_dir_to_db(&full_path, data_id).await?;
 
             let data_subdirs = self.fetch_files_from_api(data_id).await?;
             self.save_files_to_db(data_id, &data_subdirs).await?;
@@ -175,10 +170,6 @@ impl Open115Client {
             // Iterate 00..ff
             for subdir in data_subdirs {
                 if subdir.is_dir {
-                    // Add to dir_cache
-                    let sub_path = format!("{}/data/{}", self.repo_path, subdir.filename);
-                    self.save_dir_to_db(&sub_path, &subdir.file_id).await?;
-
                     let files = self.fetch_files_from_api(&subdir.file_id).await?;
                     self.save_files_to_db(&subdir.file_id, &files).await?;
                     total_data_files += files.len();
@@ -194,7 +185,7 @@ impl Open115Client {
     }
 
     pub async fn has_cache_data(&self) -> Result<bool> {
-        let count = entities::cached_files::Entity::find()
+        let count = entities::file_nodes::Entity::find()
             .count(&self.db)
             .await
             .map_err(|e| AppError::Internal(format!("DB count fail: {e}")))?;
@@ -256,32 +247,31 @@ impl Open115Client {
             .await
             .map_err(|e| AppError::Internal(format!("DB begin fail: {e}")))?;
 
-        // Delete existing files for this parent to avoid stale entries
-        // Alternatively, use Upsert. Given the requirements, overwriting for this parent seems safest.
-        entities::cached_files::Entity::delete_many()
-            .filter(entities::cached_files::Column::ParentId.eq(parent_id))
+        // Delete existing entries for this parent to avoid stale entries
+        entities::file_nodes::Entity::delete_many()
+            .filter(entities::file_nodes::Column::ParentId.eq(parent_id))
             .exec(&txn)
             .await
             .map_err(|e| AppError::Internal(format!("DB delete fail: {e}")))?;
 
         for f in files {
-            let am = entities::cached_files::ActiveModel {
+            let am = entities::file_nodes::ActiveModel {
                 file_id: Set(f.file_id.clone()),
                 parent_id: Set(parent_id.to_string()),
-                filename: Set(f.filename.clone()),
+                name: Set(f.filename.clone()),
                 is_dir: Set(f.is_dir),
                 size: Set(f.size),
                 pick_code: Set(f.pick_code.clone()),
             };
-            entities::cached_files::Entity::insert(am)
+            entities::file_nodes::Entity::insert(am)
                 .on_conflict(
-                    OnConflict::column(entities::cached_files::Column::FileId)
+                    OnConflict::column(entities::file_nodes::Column::FileId)
                         .update_columns([
-                            entities::cached_files::Column::ParentId,
-                            entities::cached_files::Column::Filename,
-                            entities::cached_files::Column::IsDir,
-                            entities::cached_files::Column::Size,
-                            entities::cached_files::Column::PickCode,
+                            entities::file_nodes::Column::ParentId,
+                            entities::file_nodes::Column::Name,
+                            entities::file_nodes::Column::IsDir,
+                            entities::file_nodes::Column::Size,
+                            entities::file_nodes::Column::PickCode,
                         ])
                         .to_owned(),
                 )
@@ -293,19 +283,6 @@ impl Open115Client {
         txn.commit()
             .await
             .map_err(|e| AppError::Internal(format!("DB commit fail: {e}")))?;
-        Ok(())
-    }
-
-    async fn save_dir_to_db(&self, path: &str, file_id: &str) -> Result<()> {
-        let am = entities::cached_dirs::ActiveModel {
-            id: sea_orm::ActiveValue::NotSet,
-            path: Set(path.to_string()),
-            file_id: Set(file_id.to_string()),
-        };
-        entities::cached_dirs::Entity::insert(am)
-            .exec(&self.db)
-            .await
-            .map_err(|e| AppError::Internal(format!("DB dir save fail: {e}")))?;
         Ok(())
     }
 
@@ -463,9 +440,9 @@ impl Open115Client {
 
     /// Find a file/dir by exact name under a directory using the cache.
     pub async fn find_file(&self, cid: &str, name: &str) -> Result<Option<FileInfo>> {
-        let res = entities::cached_files::Entity::find()
-            .filter(entities::cached_files::Column::ParentId.eq(cid))
-            .filter(entities::cached_files::Column::Filename.eq(name))
+        let res = entities::file_nodes::Entity::find()
+            .filter(entities::file_nodes::Column::ParentId.eq(cid))
+            .filter(entities::file_nodes::Column::Name.eq(name))
             .all(&self.db)
             .await
             .map_err(|e| AppError::Internal(format!("DB find_file fail: {e}")))?;
@@ -476,7 +453,7 @@ impl Open115Client {
             .max_by_key(|f| f.file_id.clone())
             .map(|f| FileInfo {
                 file_id: f.file_id,
-                filename: f.filename,
+                filename: f.name,
                 is_dir: f.is_dir,
                 size: f.size,
                 pick_code: f.pick_code,
@@ -484,8 +461,8 @@ impl Open115Client {
     }
 
     pub async fn list_files(&self, cid: &str) -> Result<Vec<FileInfo>> {
-        let res = entities::cached_files::Entity::find()
-            .filter(entities::cached_files::Column::ParentId.eq(cid))
+        let res = entities::file_nodes::Entity::find()
+            .filter(entities::file_nodes::Column::ParentId.eq(cid))
             .all(&self.db)
             .await
             .map_err(|e| AppError::Internal(format!("DB list_files fail: {e}")))?;
@@ -494,7 +471,7 @@ impl Open115Client {
             .into_iter()
             .map(|f| FileInfo {
                 file_id: f.file_id,
-                filename: f.filename,
+                filename: f.name,
                 is_dir: f.is_dir,
                 size: f.size,
                 pick_code: f.pick_code,
@@ -535,15 +512,15 @@ impl Open115Client {
             .ok_or_else(|| AppError::Internal("mkdir succeeded but no file_id".to_string()))?;
 
         // update caches
-        let am = entities::cached_files::ActiveModel {
+        let am = entities::file_nodes::ActiveModel {
             file_id: Set(id.clone()),
             parent_id: Set(pid.to_string()),
-            filename: Set(name.to_string()),
+            name: Set(name.to_string()),
             is_dir: Set(true),
             size: Set(0),
             pick_code: Set(String::new()),
         };
-        entities::cached_files::Entity::insert(am)
+        entities::file_nodes::Entity::insert(am)
             .exec(&self.db)
             .await
             .map_err(|e| AppError::Internal(format!("DB create_dir fail: {e}")))?;
@@ -556,15 +533,6 @@ impl Open115Client {
         if path.is_empty() || path == "/" {
             return Ok(Some("0".to_string()));
         }
-        let res = entities::cached_dirs::Entity::find()
-            .filter(entities::cached_dirs::Column::Path.eq(path))
-            .one(&self.db)
-            .await
-            .map_err(|e| AppError::Internal(format!("DB find_path_id fail: {e}")))?;
-
-        if let Some(row) = res {
-            return Ok(Some(row.file_id));
-        }
 
         let parts: Vec<&str> = path
             .trim_start_matches('/')
@@ -573,32 +541,23 @@ impl Open115Client {
             .collect();
 
         let mut current_id = "0".to_string();
-        let mut current_path = String::new();
 
         for part in parts {
-            current_path.push('/');
-            current_path.push_str(part);
-
-            let res = entities::cached_dirs::Entity::find()
-                .filter(entities::cached_dirs::Column::Path.eq(&current_path))
-                .one(&self.db)
+            let node = entities::file_nodes::Entity::find()
+                .filter(entities::file_nodes::Column::ParentId.eq(&current_id))
+                .filter(entities::file_nodes::Column::Name.eq(part))
+                .filter(entities::file_nodes::Column::IsDir.eq(true))
+                .all(&self.db)
                 .await
-                .map_err(|e| AppError::Internal(format!("DB in loop fail: {e}")))?;
+                .map_err(|e| AppError::Internal(format!("DB find_path_id fail: {e}")))?
+                .into_iter()
+                .max_by_key(|n| n.file_id.clone());
 
-            if let Some(row) = res {
-                current_id = row.file_id;
-                continue;
-            }
-
-            let found = self.find_file(&current_id, part).await?;
-            let Some(info) = found else {
-                return Ok(None);
-            };
-            if !info.is_dir {
+            if let Some(node) = node {
+                current_id = node.file_id;
+            } else {
                 return Ok(None);
             }
-            current_id = info.file_id.clone();
-            self.save_dir_to_db(&current_path, &current_id).await?;
         }
 
         Ok(Some(current_id))
@@ -609,6 +568,10 @@ impl Open115Client {
         path: &str,
         check_remote_before_create: bool,
     ) -> Result<String> {
+        if let Some(id) = self.find_path_id(path).await? {
+            return Ok(id);
+        }
+
         let parts: Vec<&str> = path
             .trim_start_matches('/')
             .trim_end_matches('/')
@@ -617,14 +580,20 @@ impl Open115Client {
             .collect();
 
         let mut current_id = "0".to_string();
-        let mut current_path = String::new();
 
         for part in parts {
-            current_path.push('/');
-            current_path.push_str(part);
+            let node = entities::file_nodes::Entity::find()
+                .filter(entities::file_nodes::Column::ParentId.eq(&current_id))
+                .filter(entities::file_nodes::Column::Name.eq(part))
+                .filter(entities::file_nodes::Column::IsDir.eq(true))
+                .all(&self.db)
+                .await
+                .map_err(|e| AppError::Internal(format!("DB ensure_path fail: {e}")))?
+                .into_iter()
+                .max_by_key(|n| n.file_id.clone());
 
-            if let Some(id) = self.find_path_id(&current_path).await? {
-                current_id = id;
+            if let Some(node) = node {
+                current_id = node.file_id;
                 continue;
             }
 
@@ -637,16 +606,11 @@ impl Open115Client {
                     .max_by_key(|f| &f.file_id)
                 {
                     current_id = info.file_id.clone();
-                    self.save_dir_to_db(&current_path, &current_id).await?;
                     continue;
                 }
             }
 
-            // Create first; for brand-new repos this avoids an extra search/list call per component.
-            // If it already exists, create_directory() will resolve the existing id via a cheap search.
-            let new_id = self.create_directory(&current_id, part).await?;
-            current_id = new_id.clone();
-            self.save_dir_to_db(&current_path, &current_id).await?;
+            current_id = self.create_directory(&current_id, part).await?;
         }
 
         Ok(current_id)
@@ -720,7 +684,7 @@ impl Open115Client {
         }
 
         // update cache
-        entities::cached_files::Entity::delete_by_id(file_id.to_string())
+        entities::file_nodes::Entity::delete_by_id(file_id.to_string())
             .exec(&self.db)
             .await
             .map_err(|e| AppError::Internal(format!("DB delete_file fail: {e}")))?;
@@ -1095,10 +1059,10 @@ impl Open115Client {
     }
 
     async fn handle_upload_success(&self, parent_id: &str, info: FileInfo) -> Result<()> {
-        let to_delete = entities::cached_files::Entity::find()
-            .filter(entities::cached_files::Column::ParentId.eq(parent_id))
-            .filter(entities::cached_files::Column::Filename.eq(&info.filename))
-            .filter(entities::cached_files::Column::FileId.ne(&info.file_id))
+        let to_delete = entities::file_nodes::Entity::find()
+            .filter(entities::file_nodes::Column::ParentId.eq(parent_id))
+            .filter(entities::file_nodes::Column::Name.eq(&info.filename))
+            .filter(entities::file_nodes::Column::FileId.ne(&info.file_id))
             .all(&self.db)
             .await
             .map_err(|e| AppError::Internal(format!("DB find dups fail: {e}")))?;
@@ -1115,7 +1079,7 @@ impl Open115Client {
             if let Err(e) = self.delete_file(parent_id, &dup.file_id).await {
                 tracing::warn!(
                     "Failed to delete duplicate file {} (id={}): {}",
-                    dup.filename,
+                    dup.name,
                     dup.file_id,
                     e
                 );
@@ -1123,15 +1087,15 @@ impl Open115Client {
         }
 
         // update DB with the new file info surgically (do not use save_files_to_db as it wipes the parent directory cache)
-        let am = entities::cached_files::ActiveModel {
+        let am = entities::file_nodes::ActiveModel {
             file_id: Set(info.file_id.clone()),
             parent_id: Set(parent_id.to_string()),
-            filename: Set(info.filename.clone()),
+            name: Set(info.filename.clone()),
             is_dir: Set(info.is_dir),
             size: Set(info.size),
             pick_code: Set(info.pick_code.clone()),
         };
-        entities::cached_files::Entity::insert(am)
+        entities::file_nodes::Entity::insert(am)
             .exec(&self.db)
             .await
             .map_err(|e| AppError::Internal(format!("DB insert fail: {e}")))?;

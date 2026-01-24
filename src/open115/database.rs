@@ -21,37 +21,18 @@ pub mod entities {
         impl ActiveModelBehavior for ActiveModel {}
     }
 
-    pub mod cached_dirs {
+    pub mod file_nodes {
         use sea_orm::entity::prelude::*;
 
         #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-        #[sea_orm(table_name = "cached_dirs")]
-        pub struct Model {
-            #[sea_orm(primary_key)]
-            pub id: i32,
-            #[sea_orm(indexed)]
-            pub path: String,
-            pub file_id: String,
-        }
-
-        #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-        pub enum Relation {}
-
-        impl ActiveModelBehavior for ActiveModel {}
-    }
-
-    pub mod cached_files {
-        use sea_orm::entity::prelude::*;
-
-        #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-        #[sea_orm(table_name = "cached_files")]
+        #[sea_orm(table_name = "file_nodes")]
         pub struct Model {
             #[sea_orm(primary_key, auto_increment = false)]
             pub file_id: String,
             #[sea_orm(indexed)]
             pub parent_id: String,
             #[sea_orm(indexed)]
-            pub filename: String,
+            pub name: String,
             pub is_dir: bool,
             pub size: i64,
             pub pick_code: String,
@@ -96,12 +77,7 @@ pub async fn init_db(db_url: &str) -> Result<DatabaseConnection, DbErr> {
         ),
         builder.build(
             schema
-                .create_table_from_entity(entities::cached_dirs::Entity)
-                .if_not_exists(),
-        ),
-        builder.build(
-            schema
-                .create_table_from_entity(entities::cached_files::Entity)
+                .create_table_from_entity(entities::file_nodes::Entity)
                 .if_not_exists(),
         ),
     ];
