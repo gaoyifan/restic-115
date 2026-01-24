@@ -27,34 +27,10 @@ async fn main() -> anyhow::Result<()> {
 
     let client = Open115Client::new(config.clone()).await?;
 
-    let should_warm = if config.force_cache_rebuild {
-        tracing::info!("Forced cache rebuild enabled");
-        true
-    } else {
-        match client.has_cache_data().await {
-            Ok(false) => {
-                tracing::info!("Cache database is empty, starting warmup");
-                true
-            }
-            Ok(true) => {
-                tracing::info!(
-                    "Cache exists from previous run, reusing. Use --force-cache-rebuild to update."
-                );
-                false
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to check cache status: {}, proceeding with warmup",
-                    e
-                );
-                true
-            }
-        }
-    };
-
-    if should_warm {
-        client.warm_cache().await?;
+    if config.force_cache_rebuild {
+        tracing::info!("Forced cache rebuild enabled, all directories will be refreshed");
     }
+    client.warm_cache(config.force_cache_rebuild).await?;
 
     let app = create_router(client).layer(TraceLayer::new_for_http());
     let addr: SocketAddr = config.listen_addr.parse()?;

@@ -50,7 +50,7 @@ async fn test_persistence() {
             .ensure_path(&repo_path, false)
             .await
             .expect("Failed to ensure path");
-        client.warm_cache().await.expect("Failed to warm cache");
+        client.warm_cache(false).await.expect("Failed to warm cache");
     }
 
     // 2. Second run: Use empty tokens in config, should load from DB

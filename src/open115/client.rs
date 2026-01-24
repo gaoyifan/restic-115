@@ -116,20 +116,20 @@ impl Open115Client {
         })
     }
     /// Recursively warm up the cache.
-    pub async fn warm_cache(&self) -> Result<()> {
+    pub async fn warm_cache(&self, force_rebuild: bool) -> Result<()> {
         let start = std::time::Instant::now();
         tracing::info!("Starting cache warm-up for repository: {}", self.repo_path);
 
-        // 1. Ensure repo root exists and get its ID
         let repo_id = self.ensure_path(&self.repo_path, true).await?;
         tracing::info!("Repository root found: {} (id={})", self.repo_path, repo_id);
 
-        // 2. Fetch and cache root files
-        let root_files = self.fetch_files_from_api(&repo_id).await?;
-        self.save_files_to_db(&repo_id, &root_files).await?;
-        tracing::info!("Cached {} items at repository root", root_files.len());
+        let (root_files, root_cached) = self.fetch_or_use_cache(&repo_id, force_rebuild).await?;
+        tracing::info!(
+            "Repository root: {} items {}",
+            root_files.len(),
+            if root_cached { "(cached)" } else { "(fetched)" }
+        );
 
-        // 3. Handle standard directories (keys, locks, snapshots, index, config)
         for file_type in [
             ResticFileType::Keys,
             ResticFileType::Locks,
@@ -137,59 +137,103 @@ impl Open115Client {
             ResticFileType::Index,
         ] {
             let dirname = file_type.dirname();
-            // find directory in root_files to get ID
             if let Some(dir_info) = root_files
                 .iter()
                 .filter(|f| f.filename == dirname && f.is_dir)
                 .max_by_key(|f| &f.file_id)
             {
-                let dir_id = &dir_info.file_id;
-
-                // Fetch content
-                let files = self.fetch_files_from_api(dir_id).await?;
-                self.save_files_to_db(dir_id, &files).await?;
-                tracing::info!("Cached {} items in /{}", files.len(), dirname);
+                let (files, cached) = self
+                    .fetch_or_use_cache(&dir_info.file_id, force_rebuild)
+                    .await?;
+                tracing::info!(
+                    "/{}: {} items {}",
+                    dirname,
+                    files.len(),
+                    if cached { "(cached)" } else { "(fetched)" }
+                );
             } else {
-                tracing::debug!("Directory /{} not found in root, skipping warmup", dirname);
+                tracing::debug!("Directory /{} not found in root, skipping", dirname);
             }
         }
 
-        // 4. Handle data directory and its 256 subdirectories
         if let Some(data_dir) = root_files
             .iter()
             .filter(|f| f.filename == "data" && f.is_dir)
             .max_by_key(|f| &f.file_id)
         {
-            let data_id = &data_dir.file_id;
-
-            let data_subdirs = self.fetch_files_from_api(data_id).await?;
-            self.save_files_to_db(data_id, &data_subdirs).await?;
-            tracing::info!("Cached /data directory: {} items", data_subdirs.len());
+            let (data_subdirs, data_cached) = self
+                .fetch_or_use_cache(&data_dir.file_id, force_rebuild)
+                .await?;
+            tracing::info!(
+                "/data: {} subdirs {}",
+                data_subdirs.len(),
+                if data_cached { "(cached)" } else { "(fetched)" }
+            );
 
             let mut total_data_files = 0;
-            // Iterate 00..ff
-            for subdir in data_subdirs {
+            let mut fetched_count = 0;
+            for subdir in &data_subdirs {
                 if subdir.is_dir {
-                    let files = self.fetch_files_from_api(&subdir.file_id).await?;
-                    self.save_files_to_db(&subdir.file_id, &files).await?;
+                    let (files, cached) = self
+                        .fetch_or_use_cache(&subdir.file_id, force_rebuild)
+                        .await?;
                     total_data_files += files.len();
+                    if !cached {
+                        fetched_count += 1;
+                    }
                 }
             }
-            tracing::info!("Cached {} data files total", total_data_files);
+            tracing::info!(
+                "/data/*: {} files total ({} subdirs fetched, {} cached)",
+                total_data_files,
+                fetched_count,
+                data_subdirs.iter().filter(|d| d.is_dir).count() - fetched_count
+            );
         } else {
-            tracing::debug!("Directory /data not found in root, skipping warmup");
+            tracing::debug!("Directory /data not found in root, skipping");
         }
 
         tracing::info!("Cache warm-up completed in {:?}", start.elapsed());
         Ok(())
     }
 
-    pub async fn has_cache_data(&self) -> Result<bool> {
+    async fn cache_has_children(&self, parent_id: &str) -> Result<bool> {
         let count = entities::file_nodes::Entity::find()
+            .filter(entities::file_nodes::Column::ParentId.eq(parent_id))
             .count(&self.db)
             .await
             .map_err(|e| AppError::Internal(format!("DB count fail: {e}")))?;
         Ok(count > 0)
+    }
+
+    async fn fetch_or_use_cache(
+        &self,
+        dir_id: &str,
+        force_rebuild: bool,
+    ) -> Result<(Vec<FileInfo>, bool)> {
+        if !force_rebuild && self.cache_has_children(dir_id).await? {
+            let cached = entities::file_nodes::Entity::find()
+                .filter(entities::file_nodes::Column::ParentId.eq(dir_id))
+                .all(&self.db)
+                .await
+                .map_err(|e| AppError::Internal(format!("DB query fail: {e}")))?;
+
+            let files: Vec<FileInfo> = cached
+                .into_iter()
+                .map(|m| FileInfo {
+                    file_id: m.file_id,
+                    filename: m.name,
+                    is_dir: m.is_dir,
+                    size: m.size,
+                    pick_code: m.pick_code,
+                })
+                .collect();
+            return Ok((files, true));
+        }
+
+        let files = self.fetch_files_from_api(dir_id).await?;
+        self.save_files_to_db(dir_id, &files).await?;
+        Ok((files, false))
     }
 
     async fn fetch_files_from_api(&self, cid: &str) -> Result<Vec<FileInfo>> {
