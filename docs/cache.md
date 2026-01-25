@@ -33,6 +33,9 @@ If `OPEN115_FORCE_CACHE_REBUILD=true` is set:
 - Every directory is fetched fresh from the 115 API.
 - Useful for fixing consistency issues if the cache gets out of sync with the cloud (e.g., external modification).
 
+### Failure Handling
+If any error occurs during the warmup process (e.g., network failure, authentication error), the **server will exit immediately** with an error. It does not start in a partial state. This ensures that the server only runs when it can guarantee a consistent view of the repository. Thanks to the resumable warmup logic, you can simply restart the server to retry; it will pick up where it left off.
+
 ## Runtime Consistency
 
 The cache is kept in sync during write operations:
