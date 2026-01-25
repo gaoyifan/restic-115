@@ -86,9 +86,19 @@ pub async fn init_db(db_url: &str) -> Result<DatabaseConnection, DbErr> {
         db.execute(stmt).await?;
     }
 
-    // Create indexes if they don't exist (if_not_exists is not yet supported in create_index_from_entity)
-    // Actually create_table_from_entity will include indexes if we use proper sea_query building.
-    // SeaORM's create_table_from_entity usually handles it.
+    // Create indexes from entity definitions (#[sea_orm(indexed)] attributes)
+    // create_index_from_entity generates CREATE INDEX statements, but doesn't support IF NOT EXISTS,
+    // so we ignore "already exists" errors.
+    for index_stmt in schema.create_index_from_entity(entities::file_nodes::Entity) {
+        let sql = builder.build(&index_stmt);
+        if let Err(e) = db.execute(sql).await {
+            // Ignore "index already exists" errors (SQLite error code for this)
+            let err_str = e.to_string();
+            if !err_str.contains("already exists") {
+                return Err(e);
+            }
+        }
+    }
 
     Ok(db)
 }
