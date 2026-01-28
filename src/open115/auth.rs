@@ -12,7 +12,7 @@ use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 
 const REFRESH_URL: &str = "https://passportapi.115.com/open/refreshToken";
 
-const MAX_RATE_LIMIT_RETRIES: usize = 6;
+const MAX_REFRESH_TOKEN_RETRIES: usize = 1;
 
 fn is_refresh_rate_limited(code: i64) -> bool {
     // See docs/115/接入指南/授权错误码.md
@@ -146,7 +146,7 @@ impl TokenManager {
         let body: RefreshTokenResponse = {
             let mut last_err: Option<AppError> = None;
             let mut ok_body: Option<RefreshTokenResponse> = None;
-            for attempt in 1..=MAX_RATE_LIMIT_RETRIES {
+            for attempt in 1..=MAX_REFRESH_TOKEN_RETRIES {
                 let response = self
                     .http_client
                     .post(REFRESH_URL)
@@ -159,11 +159,11 @@ impl TokenManager {
                     Ok(r) => r,
                     Err(e) => {
                         // Network/timeout: treat as retryable with backoff.
-                        if attempt < MAX_RATE_LIMIT_RETRIES {
+                        if attempt < MAX_REFRESH_TOKEN_RETRIES {
                             tracing::warn!(
                                 "refreshToken network error, backing off attempt {}/{}: {}",
                                 attempt,
-                                MAX_RATE_LIMIT_RETRIES,
+                                MAX_REFRESH_TOKEN_RETRIES,
                                 e
                             );
                             last_err = Some(AppError::HttpClient(e));
@@ -178,11 +178,11 @@ impl TokenManager {
                 let body = match parsed {
                     Ok(b) => b,
                     Err(e) => {
-                        if attempt < MAX_RATE_LIMIT_RETRIES {
+                        if attempt < MAX_REFRESH_TOKEN_RETRIES {
                             tracing::warn!(
                                 "refreshToken JSON parse error, backing off attempt {}/{}: {}",
                                 attempt,
-                                MAX_RATE_LIMIT_RETRIES,
+                                MAX_REFRESH_TOKEN_RETRIES,
                                 e
                             );
                             last_err = Some(AppError::HttpClient(e));
@@ -200,12 +200,12 @@ impl TokenManager {
                     break;
                 }
 
-                if is_refresh_rate_limited(code) && attempt < MAX_RATE_LIMIT_RETRIES {
+                if is_refresh_rate_limited(code) && attempt < MAX_REFRESH_TOKEN_RETRIES {
                     tracing::warn!(
                         "refreshToken rate limited (code={}), backing off attempt {}/{}",
                         code,
                         attempt,
-                        MAX_RATE_LIMIT_RETRIES
+                        MAX_REFRESH_TOKEN_RETRIES
                     );
                     last_err = Some(AppError::Auth(format!(
                         "Failed to refresh token: code={}, message={}",
