@@ -26,6 +26,7 @@ clap = { version = "4", features = ["derive", "env"] }
 chrono = "0.4"
 bytes = "1"
 parking_lot = "0.12"
+moka = { version = "0.12", features = ["future"] }
 
 # OSS signing + hashing
 hmac = "0.12"

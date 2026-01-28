@@ -5,6 +5,7 @@ use base64::Engine;
 use bytes::Bytes;
 use chrono::Utc;
 use hmac::{Hmac, Mac};
+use moka::future::Cache;
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::multipart::Form;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, Set};
@@ -22,6 +23,8 @@ type HmacSha1 = Hmac<sha1::Sha1>;
 
 const MAX_RATE_LIMIT_RETRIES: usize = 6;
 const MAX_OSS_PUT_RESPONSE_LOG_BYTES: usize = 512 * 1024; // 512KiB, callback JSON should be tiny.
+const DOWNLOAD_URL_CACHE_TTL_SECS: u64 = 10 * 60;
+const DOWNLOAD_URL_CACHE_MAX_ENTRIES: u64 = 10_000;
 
 fn is_access_token_invalid(code: i64) -> bool {
     // See docs/115/接入指南/授权错误码.md
@@ -91,6 +94,7 @@ pub struct Open115Client {
     repo_path: String,
     user_agent: String,
     db: DatabaseConnection,
+    download_url_cache: Cache<String, String>,
 }
 
 impl Open115Client {
@@ -113,6 +117,10 @@ impl Open115Client {
             repo_path: cfg.repo_path,
             user_agent: cfg.user_agent,
             db,
+            download_url_cache: Cache::builder()
+                .time_to_live(Duration::from_secs(DOWNLOAD_URL_CACHE_TTL_SECS))
+                .max_capacity(DOWNLOAD_URL_CACHE_MAX_ENTRIES)
+                .build(),
         })
     }
     /// Recursively warm up the cache.
@@ -737,6 +745,10 @@ impl Open115Client {
     }
 
     pub async fn get_download_url(&self, pick_code: &str) -> Result<String> {
+        if let Some(url) = self.download_url_cache.get(pick_code).await {
+            return Ok(url);
+        }
+
         let url = format!("{}/open/ufile/downurl", self.api_base);
         let pick_code_s = pick_code.to_string();
         let resp: DownUrlResponse = self
@@ -761,7 +773,11 @@ impl Open115Client {
                     .and_then(|x| x.get("url"))
                     .and_then(|x| x.as_str())
                 {
-                    return Ok(u.to_string());
+                    let url = u.to_string();
+                    self.download_url_cache
+                        .insert(pick_code.to_string(), url.clone())
+                        .await;
+                    return Ok(url);
                 }
             }
         }
