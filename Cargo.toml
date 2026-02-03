@@ -1,6 +1,6 @@
 [package]
 name = "restic-115"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 description = "Restic REST backend server for 115 Open Platform storage."
 license = "MIT"
