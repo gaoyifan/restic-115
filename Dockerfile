@@ -63,9 +63,8 @@ USER appuser
 # Expose the default port
 EXPOSE 8000
 
-# Health check (HEAD request to /config endpoint)
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD-SHELL curl -f -I "http://localhost:${LISTEN_PORT:-8000}/config" || exit 1
+    CMD curl -f -I "http://localhost:${LISTEN_PORT:-8000}/config"
 
 # Run the application
 ENTRYPOINT ["/app/restic-115"]
