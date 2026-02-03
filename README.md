@@ -19,7 +19,8 @@ Restic REST backend server backed by 115 Open Platform cloud storage. It impleme
 export OPEN115_ACCESS_TOKEN=... 
 export OPEN115_REFRESH_TOKEN=...
 export OPEN115_REPO_PATH=/restic-backup
-export LISTEN_ADDR=127.0.0.1:8000
+export LISTEN_ADDR=127.0.0.1
+export LISTEN_PORT=8000
 
 cargo run --release
 ```
@@ -38,7 +39,8 @@ All options are available as CLI flags and environment variables.
 - `OPEN115_ACCESS_TOKEN` (`--access-token`): Bearer token for `proapi.115.com`.
 - `OPEN115_REFRESH_TOKEN` (`--refresh-token`): Refresh token for `passportapi.115.com`.
 - `OPEN115_REPO_PATH` (`--repo-path`): Repository root path on 115. Default: `/restic-backup`.
-- `LISTEN_ADDR` (`--listen-addr`): Server listen address. Default: `127.0.0.1:8000`.
+- `LISTEN_ADDR` (`--listen-addr`): Server listen address (host/IP). Default: `127.0.0.1`.
+- `LISTEN_PORT` (`--listen-port`): Server listen port. Default: `8000`.
 - `RUST_LOG` (`--log-level`): Log level. Default: `info`.
 - `OPEN115_API_BASE` (`--api-base`): 115 Open Platform API base URL. Default: `https://proapi.115.com`.
 - `OPEN115_USER_AGENT` (`--user-agent`): User agent for 115 API calls. Default: `restic-115`.

@@ -19,9 +19,13 @@ pub struct Config {
     #[arg(long, env = "OPEN115_REPO_PATH", default_value = "/restic-backup")]
     pub repo_path: String,
 
-    /// Server listen address
-    #[arg(long, env = "LISTEN_ADDR", default_value = "127.0.0.1:8000")]
+    /// Server listen address (host or IP)
+    #[arg(long, env = "LISTEN_ADDR", default_value = "127.0.0.1")]
     pub listen_addr: String,
+
+    /// Server listen port
+    #[arg(long, env = "LISTEN_PORT", default_value_t = 8000)]
+    pub listen_port: u16,
 
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, env = "RUST_LOG", default_value = "info")]

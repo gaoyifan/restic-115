@@ -23,7 +23,11 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting restic-115");
     tracing::info!("Repository path: {}", config.repo_path);
-    tracing::info!("Listen address: {}", config.listen_addr);
+    tracing::info!(
+        "Listen address: {}:{}",
+        config.listen_addr,
+        config.listen_port
+    );
 
     let client = Open115Client::new(config.clone()).await?;
 
@@ -33,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
     client.warm_cache(config.force_cache_rebuild).await?;
 
     let app = create_router(client).layer(TraceLayer::new_for_http());
-    let addr: SocketAddr = config.listen_addr.parse()?;
+    let addr: SocketAddr = format!("{}:{}", config.listen_addr, config.listen_port).parse()?;
 
     tracing::info!("Server listening on http://{}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
