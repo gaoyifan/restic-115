@@ -1119,6 +1119,8 @@ impl Open115Client {
     }
 
     async fn handle_upload_success(&self, parent_id: &str, info: FileInfo) -> Result<()> {
+        use sea_orm::sea_query::OnConflict;
+
         let to_delete = entities::file_nodes::Entity::find()
             .filter(entities::file_nodes::Column::ParentId.eq(parent_id))
             .filter(entities::file_nodes::Column::Name.eq(&info.filename))
@@ -1156,6 +1158,17 @@ impl Open115Client {
             pick_code: Set(info.pick_code.clone()),
         };
         entities::file_nodes::Entity::insert(am)
+            .on_conflict(
+                OnConflict::column(entities::file_nodes::Column::FileId)
+                    .update_columns([
+                        entities::file_nodes::Column::ParentId,
+                        entities::file_nodes::Column::Name,
+                        entities::file_nodes::Column::IsDir,
+                        entities::file_nodes::Column::Size,
+                        entities::file_nodes::Column::PickCode,
+                    ])
+                    .to_owned(),
+            )
             .exec(&self.db)
             .await
             .map_err(|e| AppError::Internal(format!("DB insert fail: {e}")))?;
