@@ -33,13 +33,6 @@
       };
     });
 
-    apps = forAllSystems (system: {
-      default = {
-        type = "app";
-        program = "${nixpkgs.lib.getExe self.packages.${system}.default}";
-      };
-    });
-
     devShells = forAllSystems (system: {
       default = nixpkgs.legacyPackages.${system}.mkShell {
         packages = with nixpkgs.legacyPackages.${system}; [

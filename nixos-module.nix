@@ -16,7 +16,7 @@ in {
     };
 
     environmentFile = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
+      type = lib.types.nullOr lib.types.externalPath;
       default = null;
       description = "Environment file containing the 115 access and refresh tokens.";
     };
@@ -62,40 +62,30 @@ in {
       default = "root";
       description = "Group running restic-115.";
     };
-
-    wantedBy = lib.mkOption {
-      type = lib.types.listOf lib.types.str;
-      default = ["multi-user.target"];
-      description = "Systemd targets that should start restic-115.";
-    };
   };
 
   config = lib.mkIf cfg.enable {
-    assertions = [
-      {
-        assertion = cfg.environmentFile != null;
-        message = "services.restic-115.environmentFile must be set when enabled.";
-      }
-    ];
-
     systemd.tmpfiles.rules = [
       "d ${cfg.cacheDirectory} 0750 ${cfg.user} ${cfg.group} -"
     ];
 
     systemd.services.restic-115 = {
       description = "Restic REST backend for 115 Open Platform storage";
-      wantedBy = cfg.wantedBy;
+      wantedBy = lib.mkDefault ["multi-user.target"];
       after = ["network-online.target"];
       wants = ["network-online.target"];
       unitConfig.RequiresMountsFor = [cfg.cacheDirectory];
-      serviceConfig = {
-        ExecStart = lib.getExe cfg.package;
-        EnvironmentFile = lib.optional (cfg.environmentFile != null) cfg.environmentFile;
-        User = cfg.user;
-        Group = cfg.group;
-        Restart = "on-failure";
-        RestartSec = "5s";
-      };
+      serviceConfig =
+        {
+          ExecStart = lib.getExe cfg.package;
+          User = cfg.user;
+          Group = cfg.group;
+          Restart = "on-failure";
+          RestartSec = "5s";
+        }
+        // lib.optionalAttrs (cfg.environmentFile != null) {
+          EnvironmentFile = cfg.environmentFile;
+        };
       environment = {
         LISTEN_ADDR = cfg.listenAddress;
         LISTEN_PORT = toString cfg.listenPort;
