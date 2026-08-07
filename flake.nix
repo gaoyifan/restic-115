@@ -22,7 +22,9 @@
         version = "0.2.6";
         src = ./.;
 
-        cargoHash = "sha256-NmDlAH35tghCyTIOLBekfNYidvFJD5bZ3CYvijK3tDM=";
+        cargoHash = "sha256-OoxXnqfz5jwlKhRiLmhCA88wapSy6zlo61DrmVM5ZA8=";
+        nativeBuildInputs = [pkgs.pkg-config];
+        buildInputs = [pkgs.openssl];
 
         meta = {
           description = "Restic REST backend for 115 Open Platform storage";
