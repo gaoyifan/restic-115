@@ -346,14 +346,21 @@ async fn get_file(
                     .into_response());
             }
         };
-        let data = state
-            .client
-            .download_cached_file(
-                &file,
-                (!file_type.is_config()).then_some(name.as_str()),
-                Some((start, end)),
-            )
-            .await?;
+        let data = if file_type == ResticFileType::Data {
+            state
+                .client
+                .download_file(&file.pick_code, Some((start, end)))
+                .await?
+        } else {
+            state
+                .client
+                .download_cached_file(
+                    &file,
+                    (!file_type.is_config()).then_some(name.as_str()),
+                    Some((start, end)),
+                )
+                .await?
+        };
 
         let content_range = format!("bytes {}-{}/{}", start, end, file_size);
         let mut resp_headers = HeaderMap::new();
@@ -369,14 +376,24 @@ async fn get_file(
         resp_headers.insert(header::CONTENT_RANGE, content_range.parse().unwrap());
         Ok((StatusCode::PARTIAL_CONTENT, resp_headers, data).into_response())
     } else {
-        let data = state
-            .client
-            .download_cached_file(
-                &file,
-                (!file_type.is_config()).then_some(name.as_str()),
-                None,
-            )
-            .await?;
+        let data = if file_type == ResticFileType::Data {
+            let data = state.client.download_file(&file.pick_code, None).await?;
+            if !Open115Client::blob_content_matches(&name, &data) {
+                return Err(AppError::Internal(format!(
+                    "Restic blob hash mismatch for {name}"
+                )));
+            }
+            data
+        } else {
+            state
+                .client
+                .download_cached_file(
+                    &file,
+                    (!file_type.is_config()).then_some(name.as_str()),
+                    None,
+                )
+                .await?
+        };
         let mut resp_headers = HeaderMap::new();
         resp_headers.insert(
             header::CONTENT_TYPE,
