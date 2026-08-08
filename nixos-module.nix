@@ -126,6 +126,7 @@ in {
               OPEN115_REPO_PATH = instance.repositoryPath;
               OPEN115_FORCE_CACHE_REBUILD = lib.boolToString instance.forceCacheRebuild;
               DB_PATH = "${instance.cacheDirectory}/cache-115.db";
+              CONTENT_CACHE_DIR = "${instance.cacheDirectory}/content";
             };
           }
       )

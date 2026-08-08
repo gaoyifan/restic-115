@@ -50,6 +50,7 @@ async fn make_test_client(repo_path: &str) -> Option<Open115Client> {
         user_agent: "restic-115-tests".to_string(),
         callback_server: "https://api.oplist.org/115cloud/callback".to_string(),
         db_path: "test-integration.db".to_string(),
+        content_cache_dir: "test-integration-content".into(),
         force_cache_rebuild: false,
     })
     .await

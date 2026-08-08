@@ -43,23 +43,6 @@ pub mod entities {
 
         impl ActiveModelBehavior for ActiveModel {}
     }
-
-    pub mod file_contents {
-        use sea_orm::entity::prelude::*;
-
-        #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-        #[sea_orm(table_name = "file_contents")]
-        pub struct Model {
-            #[sea_orm(primary_key, auto_increment = false)]
-            pub file_id: String,
-            pub content: Vec<u8>,
-        }
-
-        #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-        pub enum Relation {}
-
-        impl ActiveModelBehavior for ActiveModel {}
-    }
 }
 
 // =========================================================================
@@ -95,11 +78,6 @@ pub async fn init_db(db_url: &str) -> Result<DatabaseConnection, DbErr> {
         builder.build(
             schema
                 .create_table_from_entity(entities::file_nodes::Entity)
-                .if_not_exists(),
-        ),
-        builder.build(
-            schema
-                .create_table_from_entity(entities::file_contents::Entity)
                 .if_not_exists(),
         ),
     ];

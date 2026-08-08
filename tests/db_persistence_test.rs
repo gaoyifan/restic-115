@@ -17,6 +17,7 @@ async fn get_test_config(repo_path: &str) -> Option<Config> {
         user_agent: "restic-115-tests".to_string(),
         callback_server: "https://api.oplist.org/115cloud/callback".to_string(),
         db_path: "test-persistence.db".to_string(),
+        content_cache_dir: "test-persistence-content".into(),
         force_cache_rebuild: false,
     })
 }

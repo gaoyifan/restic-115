@@ -8,7 +8,8 @@ Restic REST backend server backed by 115 Open Platform cloud storage. It impleme
 - Stores repository data in 115 Open Platform storage under a configurable repo path.
 - Caches directory and file metadata in SQLite and reuses it across runs.
 - Persists the contents of `config/`, `keys/`, `locks/`, `snapshots/`, and
-  `index/` objects in SQLite; `data/` pack files are always read from 115.
+  `index/` objects in the filesystem cache; `data/` pack files are always read
+  from 115.
 - Auto-refreshes access tokens using the refresh token.
 - Supports HTTP Range requests for efficient partial downloads.
 
@@ -54,10 +55,11 @@ directory and passes their paths to the server.
 - `OPEN115_CALLBACK_SERVER` (`--callback-server`): Callback server hint (documentation only).
 - `OPEN115_FORCE_CACHE_REBUILD` (`--force-cache-rebuild`): Force cache warm-up on startup.
 - `DB_PATH` (`--db-path`): SQLite DB path. Default: `cache-115.db`.
+- `CONTENT_CACHE_DIR` (`--content-cache-dir`): Filesystem cache for non-`data/` contents. Default: `content-cache-115`.
 
 ## Cache behavior
 
-On startup the server checks the SQLite cache. If it is empty (or `OPEN115_FORCE_CACHE_REBUILD=true`), it warms the cache by listing the repository root, the standard restic directories, and all `data/xx` subdirectories. It also fills the persistent content cache for every non-`data/` object. Reads and uploads update this content cache, while `data/` pack files are never stored locally.
+On startup the server checks the SQLite metadata cache. If it is empty (or `OPEN115_FORCE_CACHE_REBUILD=true`), it warms the cache by listing the repository root, the standard restic directories, and all `data/xx` subdirectories. It also fills the filesystem content cache for every non-`data/` object. Reads and uploads update this content cache, while `data/` pack files are never stored locally.
 
 ## Docker
 

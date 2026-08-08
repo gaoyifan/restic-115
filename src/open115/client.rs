@@ -11,7 +11,11 @@ use reqwest::multipart::Form;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, Set};
 use serde_json::Value;
 use sha1::Digest;
-use std::time::Duration;
+use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 use super::ResticFileType;
 use super::auth::TokenManager;
@@ -25,6 +29,7 @@ const MAX_RATE_LIMIT_RETRIES: usize = 6;
 const MAX_OSS_PUT_RESPONSE_LOG_BYTES: usize = 512 * 1024; // 512KiB, callback JSON should be tiny.
 const DOWNLOAD_URL_CACHE_TTL_SECS: u64 = 10 * 60;
 const DOWNLOAD_URL_CACHE_MAX_ENTRIES: u64 = 10_000;
+static CONTENT_CACHE_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 fn is_access_token_invalid(code: i64) -> bool {
     // See docs/115/接入指南/授权错误码.md
@@ -94,6 +99,7 @@ pub struct Open115Client {
     repo_path: String,
     user_agent: String,
     db: DatabaseConnection,
+    content_cache_dir: PathBuf,
     download_url_cache: Cache<String, String>,
 }
 
@@ -103,6 +109,7 @@ impl Open115Client {
         let db = init_db(&db_url)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to init DB: {e}")))?;
+        tokio::fs::create_dir_all(&cfg.content_cache_dir).await?;
 
         let token_manager = TokenManager::new(
             db.clone(),
@@ -117,6 +124,7 @@ impl Open115Client {
             repo_path: cfg.repo_path,
             user_agent: cfg.user_agent,
             db,
+            content_cache_dir: cfg.content_cache_dir,
             download_url_cache: Cache::builder()
                 .time_to_live(Duration::from_secs(DOWNLOAD_URL_CACHE_TTL_SECS))
                 .max_capacity(DOWNLOAD_URL_CACHE_MAX_ENTRIES)
@@ -769,10 +777,7 @@ impl Open115Client {
             .exec(&self.db)
             .await
             .map_err(|e| AppError::Internal(format!("DB delete_file fail: {e}")))?;
-        entities::file_contents::Entity::delete_by_id(file_id.to_string())
-            .exec(&self.db)
-            .await
-            .map_err(|e| AppError::Internal(format!("DB delete_file_content fail: {e}")))?;
+        self.remove_cached_file_content(file_id).await?;
 
         Ok(())
     }
@@ -782,42 +787,43 @@ impl Open115Client {
         file_id: &str,
         expected_size: i64,
     ) -> Result<Option<Bytes>> {
-        let content = entities::file_contents::Entity::find_by_id(file_id.to_string())
-            .one(&self.db)
-            .await
-            .map_err(|e| AppError::Internal(format!("DB cached_file_content fail: {e}")))?;
-
-        let Some(content) = content else {
-            return Ok(None);
+        let path = self.content_cache_path(file_id);
+        let content = match tokio::fs::read(&path).await {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
         };
 
-        if content.content.len() as i64 == expected_size {
-            return Ok(Some(Bytes::from(content.content)));
+        if content.len() as i64 == expected_size {
+            return Ok(Some(Bytes::from(content)));
         }
 
-        entities::file_contents::Entity::delete_by_id(file_id.to_string())
-            .exec(&self.db)
-            .await
-            .map_err(|e| AppError::Internal(format!("DB delete stale file_content fail: {e}")))?;
+        self.remove_cached_file_content(file_id).await?;
         Ok(None)
     }
 
     pub async fn cache_file_content(&self, file_id: &str, content: &[u8]) -> Result<()> {
-        use sea_orm::sea_query::OnConflict;
-
-        entities::file_contents::Entity::insert(entities::file_contents::ActiveModel {
-            file_id: Set(file_id.to_string()),
-            content: Set(content.to_vec()),
-        })
-        .on_conflict(
-            OnConflict::column(entities::file_contents::Column::FileId)
-                .update_columns([entities::file_contents::Column::Content])
-                .to_owned(),
-        )
-        .exec(&self.db)
-        .await
-        .map_err(|e| AppError::Internal(format!("DB cache_file_content fail: {e}")))?;
+        let path = self.content_cache_path(file_id);
+        let temporary_path = self.content_cache_dir.join(format!(
+            ".{file_id}.tmp-{}-{}",
+            std::process::id(),
+            CONTENT_CACHE_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        tokio::fs::write(&temporary_path, content).await?;
+        tokio::fs::rename(temporary_path, path).await?;
         Ok(())
+    }
+
+    async fn remove_cached_file_content(&self, file_id: &str) -> Result<()> {
+        match tokio::fs::remove_file(self.content_cache_path(file_id)).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn content_cache_path(&self, file_id: &str) -> PathBuf {
+        self.content_cache_dir.join(file_id)
     }
 
     pub async fn download_cached_file(
@@ -1553,6 +1559,7 @@ mod tests {
             refresh_token: Some("fake_refresh".to_string()),
             refresh_token_file: None,
             db_path: ":memory:".to_string(),
+            content_cache_dir: "test-content-cache".into(),
             repo_path: "/test".to_string(),
             listen_addr: "127.0.0.1".to_string(),
             listen_port: 0,

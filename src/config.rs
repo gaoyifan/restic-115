@@ -67,6 +67,10 @@ pub struct Config {
     /// Path to the SQLite database file
     #[arg(long, env = "DB_PATH", default_value = "cache-115.db")]
     pub db_path: String,
+
+    /// Directory containing cached non-data repository file contents.
+    #[arg(long, env = "CONTENT_CACHE_DIR", default_value = "content-cache-115")]
+    pub content_cache_dir: PathBuf,
 }
 
 impl Config {
