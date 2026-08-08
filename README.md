@@ -36,6 +36,11 @@ restic -r rest:http://127.0.0.1:8000/ init
 
 All options are available as CLI flags and environment variables.
 
+The NixOS module uses systemd credentials instead of `EnvironmentFile`. Set
+`services.restic-115.instances.<name>.accessTokenFile` and
+`refreshTokenFile`; the module loads them into the service's private credential
+directory and passes their paths to the server.
+
 - `OPEN115_ACCESS_TOKEN` (`--access-token`): Bearer token for `proapi.115.com`.
 - `OPEN115_REFRESH_TOKEN` (`--refresh-token`): Refresh token for `passportapi.115.com`.
 - `OPEN115_REPO_PATH` (`--repo-path`): Repository root path on 115. Default: `/restic-backup`.

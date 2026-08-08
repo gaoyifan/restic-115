@@ -1,6 +1,7 @@
 //! Configuration handling for the application.
 
 use clap::Parser;
+use std::path::PathBuf;
 
 /// Restic REST API server backed by 115 open platform.
 #[derive(Parser, Debug, Clone)]
@@ -11,9 +12,17 @@ pub struct Config {
     #[arg(long, env = "OPEN115_ACCESS_TOKEN")]
     pub access_token: Option<String>,
 
+    /// File containing the 115 access token.
+    #[arg(long, conflicts_with = "access-token", env = "OPEN115_ACCESS_TOKEN_FILE")]
+    pub access_token_file: Option<PathBuf>,
+
     /// 115 refresh token (used to refresh access token via passportapi.115.com)
     #[arg(long, env = "OPEN115_REFRESH_TOKEN")]
     pub refresh_token: Option<String>,
+
+    /// File containing the 115 refresh token.
+    #[arg(long, conflicts_with = "refresh-token", env = "OPEN115_REFRESH_TOKEN_FILE")]
+    pub refresh_token_file: Option<PathBuf>,
 
     /// Root folder path on 115 for the repository
     #[arg(long, env = "OPEN115_REPO_PATH", default_value = "/restic-backup")]
@@ -58,4 +67,26 @@ pub struct Config {
     /// Path to the SQLite database file
     #[arg(long, env = "DB_PATH", default_value = "cache-115.db")]
     pub db_path: String,
+}
+
+impl Config {
+    pub fn load_credentials(mut self) -> anyhow::Result<Self> {
+        if self.access_token.is_none() {
+            self.access_token = self
+                .access_token_file
+                .as_ref()
+                .map(std::fs::read_to_string)
+                .transpose()?
+                .map(|value| value.trim().to_owned());
+        }
+        if self.refresh_token.is_none() {
+            self.refresh_token = self
+                .refresh_token_file
+                .as_ref()
+                .map(std::fs::read_to_string)
+                .transpose()?
+                .map(|value| value.trim().to_owned());
+        }
+        Ok(self)
+    }
 }

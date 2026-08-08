@@ -1443,7 +1443,9 @@ mod tests {
         // Setup a dummy client with in-memory DB
         let cfg = Config {
             access_token: Some("fake_access".to_string()),
+            access_token_file: None,
             refresh_token: Some("fake_refresh".to_string()),
+            refresh_token_file: None,
             db_path: ":memory:".to_string(),
             repo_path: "/test".to_string(),
             listen_addr: "127.0.0.1".to_string(),

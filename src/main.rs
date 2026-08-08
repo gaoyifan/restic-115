@@ -11,7 +11,7 @@ use restic_115::restic::create_router;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config = Config::parse();
+    let config = Config::parse().load_credentials()?;
 
     tracing_subscriber::registry()
         .with(

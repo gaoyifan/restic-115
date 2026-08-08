@@ -6,7 +6,9 @@ async fn get_test_config(repo_path: &str) -> Option<Config> {
     let refresh = env::var("OPEN115_REFRESH_TOKEN").ok()?;
     Some(Config {
         access_token: Some(access),
+        access_token_file: None,
         refresh_token: Some(refresh),
+        refresh_token_file: None,
         repo_path: repo_path.to_string(),
         listen_addr: "127.0.0.1".to_string(),
         listen_port: 0,

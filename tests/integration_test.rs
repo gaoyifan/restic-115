@@ -39,7 +39,9 @@ async fn make_test_client(repo_path: &str) -> Option<Open115Client> {
     let (access, refresh) = get_test_tokens()?;
     Open115Client::new(Config {
         access_token: Some(access),
+        access_token_file: None,
         refresh_token: Some(refresh),
+        refresh_token_file: None,
         repo_path: repo_path.to_string(),
         listen_addr: "127.0.0.1".to_string(),
         listen_port: 0,
