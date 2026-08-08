@@ -115,7 +115,7 @@ async fn get_config(State(state): State<Arc<AppState>>) -> Result<impl IntoRespo
         .await?
         .ok_or_else(|| AppError::NotFound("config".to_string()))?;
 
-    let data = state.client.download_file(&file.pick_code, None).await?;
+    let data = state.client.download_cached_file(&file, None).await?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -140,8 +140,20 @@ async fn post_config(
 
     tracing::info!("Saving config ({} bytes)", body.len());
     let dir_id = state.client.get_type_dir_id(ResticFileType::Config).await?;
-    // Config is immediately read by restic; local cache is updated by upload_file.
-    state.client.upload_file(&dir_id, "config", body).await?;
+    // Config is immediately read by restic; keep the new content in the local cache.
+    state
+        .client
+        .upload_file(&dir_id, "config", body.clone())
+        .await?;
+    let file = state
+        .client
+        .find_file(&dir_id, "config")
+        .await?
+        .ok_or_else(|| AppError::Internal("Uploaded config was not found in cache".to_string()))?;
+    state
+        .client
+        .cache_file_content(&file.file_id, &body)
+        .await?;
     Ok(StatusCode::OK)
 }
 
@@ -336,7 +348,7 @@ async fn get_file(
         };
         let data = state
             .client
-            .download_file(&file.pick_code, Some((start, end)))
+            .download_cached_file(&file, Some((start, end)))
             .await?;
 
         let content_range = format!("bytes {}-{}/{}", start, end, file_size);
@@ -353,7 +365,7 @@ async fn get_file(
         resp_headers.insert(header::CONTENT_RANGE, content_range.parse().unwrap());
         Ok((StatusCode::PARTIAL_CONTENT, resp_headers, data).into_response())
     } else {
-        let data = state.client.download_file(&file.pick_code, None).await?;
+        let data = state.client.download_cached_file(&file, None).await?;
         let mut resp_headers = HeaderMap::new();
         resp_headers.insert(
             header::CONTENT_TYPE,
@@ -390,7 +402,23 @@ async fn post_file(
         state.client.get_type_dir_id(file_type).await?
     };
 
-    state.client.upload_file(&dir_id, &name, body).await?;
+    state
+        .client
+        .upload_file(&dir_id, &name, body.clone())
+        .await?;
+    if file_type != ResticFileType::Data {
+        let file = state
+            .client
+            .find_file(&dir_id, &name)
+            .await?
+            .ok_or_else(|| {
+                AppError::Internal(format!("Uploaded file was not found in cache: {name}"))
+            })?;
+        state
+            .client
+            .cache_file_content(&file.file_id, &body)
+            .await?;
+    }
     Ok(StatusCode::OK)
 }
 

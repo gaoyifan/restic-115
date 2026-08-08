@@ -7,6 +7,8 @@ Restic REST backend server backed by 115 Open Platform cloud storage. It impleme
 - Provides the restic REST v2 endpoints over HTTP (Axum).
 - Stores repository data in 115 Open Platform storage under a configurable repo path.
 - Caches directory and file metadata in SQLite and reuses it across runs.
+- Persists the contents of `config/`, `keys/`, `locks/`, `snapshots/`, and
+  `index/` objects in SQLite; `data/` pack files are always read from 115.
 - Auto-refreshes access tokens using the refresh token.
 - Supports HTTP Range requests for efficient partial downloads.
 
@@ -55,7 +57,7 @@ directory and passes their paths to the server.
 
 ## Cache behavior
 
-On startup the server checks the SQLite cache. If it is empty (or `OPEN115_FORCE_CACHE_REBUILD=true`), it warms the cache by listing the repository root, the standard restic directories, and all `data/xx` subdirectories. The cache is updated on uploads and deletes to keep restic requests fast and avoid extra API listing calls.
+On startup the server checks the SQLite cache. If it is empty (or `OPEN115_FORCE_CACHE_REBUILD=true`), it warms the cache by listing the repository root, the standard restic directories, and all `data/xx` subdirectories. It also fills the persistent content cache for every non-`data/` object. Reads and uploads update this content cache, while `data/` pack files are never stored locally.
 
 ## Docker
 

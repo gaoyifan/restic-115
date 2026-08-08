@@ -137,6 +137,7 @@ impl Open115Client {
             root_files.len(),
             if root_cached { "(cached)" } else { "(fetched)" }
         );
+        self.warm_file_contents(&root_files).await?;
 
         for file_type in [
             ResticFileType::Keys,
@@ -159,6 +160,7 @@ impl Open115Client {
                     files.len(),
                     if cached { "(cached)" } else { "(fetched)" }
                 );
+                self.warm_file_contents(&files).await?;
             } else {
                 tracing::debug!("Directory /{} not found in root, skipping", dirname);
             }
@@ -202,6 +204,33 @@ impl Open115Client {
         }
 
         tracing::info!("Cache warm-up completed in {:?}", start.elapsed());
+        Ok(())
+    }
+
+    async fn warm_file_contents(&self, files: &[FileInfo]) -> Result<()> {
+        let mut cached = 0;
+        let mut fetched = 0;
+
+        for file in files.iter().filter(|file| !file.is_dir) {
+            if self
+                .cached_file_content(&file.file_id, file.size)
+                .await?
+                .is_some()
+            {
+                cached += 1;
+                continue;
+            }
+
+            let content = self.download_file(&file.pick_code, None).await?;
+            self.cache_file_content(&file.file_id, &content).await?;
+            fetched += 1;
+        }
+
+        tracing::info!(
+            "Non-data content cache: {} files fetched, {} cached",
+            fetched,
+            cached
+        );
         Ok(())
     }
 
@@ -740,8 +769,85 @@ impl Open115Client {
             .exec(&self.db)
             .await
             .map_err(|e| AppError::Internal(format!("DB delete_file fail: {e}")))?;
+        entities::file_contents::Entity::delete_by_id(file_id.to_string())
+            .exec(&self.db)
+            .await
+            .map_err(|e| AppError::Internal(format!("DB delete_file_content fail: {e}")))?;
 
         Ok(())
+    }
+
+    pub async fn cached_file_content(
+        &self,
+        file_id: &str,
+        expected_size: i64,
+    ) -> Result<Option<Bytes>> {
+        let content = entities::file_contents::Entity::find_by_id(file_id.to_string())
+            .one(&self.db)
+            .await
+            .map_err(|e| AppError::Internal(format!("DB cached_file_content fail: {e}")))?;
+
+        let Some(content) = content else {
+            return Ok(None);
+        };
+
+        if content.content.len() as i64 == expected_size {
+            return Ok(Some(Bytes::from(content.content)));
+        }
+
+        entities::file_contents::Entity::delete_by_id(file_id.to_string())
+            .exec(&self.db)
+            .await
+            .map_err(|e| AppError::Internal(format!("DB delete stale file_content fail: {e}")))?;
+        Ok(None)
+    }
+
+    pub async fn cache_file_content(&self, file_id: &str, content: &[u8]) -> Result<()> {
+        use sea_orm::sea_query::OnConflict;
+
+        entities::file_contents::Entity::insert(entities::file_contents::ActiveModel {
+            file_id: Set(file_id.to_string()),
+            content: Set(content.to_vec()),
+        })
+        .on_conflict(
+            OnConflict::column(entities::file_contents::Column::FileId)
+                .update_columns([entities::file_contents::Column::Content])
+                .to_owned(),
+        )
+        .exec(&self.db)
+        .await
+        .map_err(|e| AppError::Internal(format!("DB cache_file_content fail: {e}")))?;
+        Ok(())
+    }
+
+    pub async fn download_cached_file(
+        &self,
+        file: &FileInfo,
+        range: Option<(u64, u64)>,
+    ) -> Result<Bytes> {
+        let content =
+            if let Some(content) = self.cached_file_content(&file.file_id, file.size).await? {
+                content
+            } else {
+                let content = self.download_file(&file.pick_code, None).await?;
+                self.cache_file_content(&file.file_id, &content).await?;
+                content
+            };
+
+        let Some((start, end)) = range else {
+            return Ok(content);
+        };
+
+        let end = usize::try_from(end)
+            .map_err(|_| AppError::Internal("File range exceeds platform limits".to_string()))?;
+        let start = usize::try_from(start)
+            .map_err(|_| AppError::Internal("File range exceeds platform limits".to_string()))?;
+        if start > end || end >= content.len() {
+            return Err(AppError::Internal(
+                "Cached file content is shorter than its metadata".to_string(),
+            ));
+        }
+        Ok(content.slice(start..=end))
     }
 
     pub async fn get_download_url(&self, pick_code: &str) -> Result<String> {
