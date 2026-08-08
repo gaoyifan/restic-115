@@ -145,8 +145,6 @@ impl Open115Client {
             root_files.len(),
             if root_cached { "(cached)" } else { "(fetched)" }
         );
-        self.warm_file_contents(&root_files).await?;
-
         for file_type in [
             ResticFileType::Keys,
             ResticFileType::Locks,
@@ -168,7 +166,6 @@ impl Open115Client {
                     files.len(),
                     if cached { "(cached)" } else { "(fetched)" }
                 );
-                self.warm_file_contents(&files).await?;
             } else {
                 tracing::debug!("Directory /{} not found in root, skipping", dirname);
             }
@@ -212,33 +209,6 @@ impl Open115Client {
         }
 
         tracing::info!("Cache warm-up completed in {:?}", start.elapsed());
-        Ok(())
-    }
-
-    async fn warm_file_contents(&self, files: &[FileInfo]) -> Result<()> {
-        let mut cached = 0;
-        let mut fetched = 0;
-
-        for file in files.iter().filter(|file| !file.is_dir) {
-            if self
-                .cached_file_content(&file.file_id, file.size)
-                .await?
-                .is_some()
-            {
-                cached += 1;
-                continue;
-            }
-
-            let content = self.download_file(&file.pick_code, None).await?;
-            self.cache_file_content(&file.file_id, &content).await?;
-            fetched += 1;
-        }
-
-        tracing::info!(
-            "Non-data content cache: {} files fetched, {} cached",
-            fetched,
-            cached
-        );
         Ok(())
     }
 

@@ -59,7 +59,7 @@ directory and passes their paths to the server.
 
 ## Cache behavior
 
-On startup the server checks the SQLite metadata cache. If it is empty (or `OPEN115_FORCE_CACHE_REBUILD=true`), it warms the cache by listing the repository root, the standard restic directories, and all `data/xx` subdirectories. It also fills the filesystem content cache for every non-`data/` object. Reads and uploads update this content cache, while `data/` pack files are never stored locally.
+On startup the server checks the SQLite metadata cache. If it is empty (or `OPEN115_FORCE_CACHE_REBUILD=true`), it warms the cache by listing the repository root, the standard restic directories, and all `data/xx` subdirectories. Non-`data/` content is cached on first read and updated on upload, while `data/` pack files are never stored locally.
 
 ## Docker
 
