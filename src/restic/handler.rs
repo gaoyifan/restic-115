@@ -115,7 +115,7 @@ async fn get_config(State(state): State<Arc<AppState>>) -> Result<impl IntoRespo
         .await?
         .ok_or_else(|| AppError::NotFound("config".to_string()))?;
 
-    let data = state.client.download_cached_file(&file, None).await?;
+    let data = state.client.download_cached_file(&file, None, None).await?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -348,7 +348,11 @@ async fn get_file(
         };
         let data = state
             .client
-            .download_cached_file(&file, Some((start, end)))
+            .download_cached_file(
+                &file,
+                (!file_type.is_config()).then_some(name.as_str()),
+                Some((start, end)),
+            )
             .await?;
 
         let content_range = format!("bytes {}-{}/{}", start, end, file_size);
@@ -365,7 +369,14 @@ async fn get_file(
         resp_headers.insert(header::CONTENT_RANGE, content_range.parse().unwrap());
         Ok((StatusCode::PARTIAL_CONTENT, resp_headers, data).into_response())
     } else {
-        let data = state.client.download_cached_file(&file, None).await?;
+        let data = state
+            .client
+            .download_cached_file(
+                &file,
+                (!file_type.is_config()).then_some(name.as_str()),
+                None,
+            )
+            .await?;
         let mut resp_headers = HeaderMap::new();
         resp_headers.insert(
             header::CONTENT_TYPE,
@@ -394,6 +405,12 @@ async fn post_file(
         .ok()
         .ok_or_else(|| AppError::BadRequest(format!("Invalid type: {}", type_str)))?;
 
+    if !file_type.is_config() && !Open115Client::blob_content_matches(&name, &body) {
+        return Err(AppError::BadRequest(format!(
+            "Restic blob name is not the SHA-256 of its content: {name}"
+        )));
+    }
+
     tracing::info!("Uploading {}/{} ({} bytes)", type_str, name, body.len());
 
     let dir_id = if file_type == ResticFileType::Data {
@@ -406,7 +423,7 @@ async fn post_file(
         .client
         .upload_file(&dir_id, &name, body.clone())
         .await?;
-    if file_type != ResticFileType::Data {
+    if file_type != ResticFileType::Data && !file_type.is_config() {
         let file = state
             .client
             .find_file(&dir_id, &name)

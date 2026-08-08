@@ -59,7 +59,7 @@ directory and passes their paths to the server.
 
 ## Cache behavior
 
-On startup the server checks the SQLite metadata cache. If it is empty (or `OPEN115_FORCE_CACHE_REBUILD=true`), it warms the cache by listing the repository root, the standard restic directories, and all `data/xx` subdirectories. Non-`data/` content is cached on first read and updated on upload, while `data/` pack files are never stored locally.
+On startup the server checks the SQLite metadata cache. If it is empty (or `OPEN115_FORCE_CACHE_REBUILD=true`), it warms the cache by listing the repository root, the standard restic directories, and all `data/xx` subdirectories. Non-`data/` content is cached on first read and updated on upload, while `data/` pack files are never stored locally. For every non-`config` blob that is read in full or uploaded, the server verifies that the lower-case SHA-256 digest of the bytes matches the blob name. A mismatching cached file is discarded and fetched again; a mismatching upload is rejected before it is sent to 115. Range reads of `data/` pack files remain streamed and are not read in full just to calculate a digest.
 
 ## Docker
 

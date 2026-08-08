@@ -11,6 +11,7 @@ use reqwest::multipart::Form;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, Set};
 use serde_json::Value;
 use sha1::Digest;
+use sha2::Sha256;
 use std::{
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
@@ -756,6 +757,7 @@ impl Open115Client {
         &self,
         file_id: &str,
         expected_size: i64,
+        expected_name: Option<&str>,
     ) -> Result<Option<Bytes>> {
         let path = self.content_cache_path(file_id);
         let content = match tokio::fs::read(&path).await {
@@ -764,7 +766,9 @@ impl Open115Client {
             Err(error) => return Err(error.into()),
         };
 
-        if content.len() as i64 == expected_size {
+        if content.len() as i64 == expected_size
+            && expected_name.is_none_or(|name| Self::blob_content_matches(name, &content))
+        {
             return Ok(Some(Bytes::from(content)));
         }
 
@@ -799,16 +803,26 @@ impl Open115Client {
     pub async fn download_cached_file(
         &self,
         file: &FileInfo,
+        expected_name: Option<&str>,
         range: Option<(u64, u64)>,
     ) -> Result<Bytes> {
-        let content =
-            if let Some(content) = self.cached_file_content(&file.file_id, file.size).await? {
-                content
-            } else {
-                let content = self.download_file(&file.pick_code, None).await?;
-                self.cache_file_content(&file.file_id, &content).await?;
-                content
-            };
+        let content = if let Some(content) = self
+            .cached_file_content(&file.file_id, file.size, expected_name)
+            .await?
+        {
+            content
+        } else {
+            let content = self.download_file(&file.pick_code, None).await?;
+            if let Some(name) = expected_name
+                && !Self::blob_content_matches(name, &content)
+            {
+                return Err(AppError::Internal(format!(
+                    "Restic blob hash mismatch for {name}"
+                )));
+            }
+            self.cache_file_content(&file.file_id, &content).await?;
+            content
+        };
 
         let Some((start, end)) = range else {
             return Ok(content);
@@ -824,6 +838,14 @@ impl Open115Client {
             ));
         }
         Ok(content.slice(start..=end))
+    }
+
+    pub fn blob_content_matches(name: &str, content: &[u8]) -> bool {
+        name.len() == 64
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            && hex::encode(Sha256::digest(content)) == name
     }
 
     pub async fn get_download_url(&self, pick_code: &str) -> Result<String> {
@@ -1518,6 +1540,17 @@ mod tests {
         // Mixed
         assert!(is_api_error(&json!({"state": true, "code": 99})));
         assert!(is_api_error(&json!({"state": false, "code": 0}))); // if state says false, it's an error even if code is 0 (though unlikely from API)
+    }
+
+    #[test]
+    fn test_blob_content_matches() {
+        let content = b"restic blob";
+        let name = hex::encode(Sha256::digest(content));
+
+        assert!(Open115Client::blob_content_matches(&name, content));
+        assert!(!Open115Client::blob_content_matches(&name, b"different"));
+        assert!(!Open115Client::blob_content_matches(&name.to_uppercase(), content));
+        assert!(!Open115Client::blob_content_matches("config", content));
     }
 
     #[tokio::test]
